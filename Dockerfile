@@ -1,14 +1,14 @@
-# Use Java 17 as base image (or Java 11/21 depending on your project)
+# Use an official OpenJDK runtime as base image
 FROM eclipse-temurin:17-jdk-alpine
 
 # Set working directory
 WORKDIR /app
 
-# Copy the JAR file from target folder
+# Copy the jar file into the container
 COPY target/*.jar app.jar
 
-# Expose port 8080 (Spring Boot default)
-EXPOSE 8081
+# Expose the port your Spring Boot app runs on (default is 8080)
+EXPOSE 8080
 
 # Run the application
 ENTRYPOINT ["java", "-jar", "app.jar"]
