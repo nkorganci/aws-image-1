@@ -19,10 +19,6 @@ pipeline {
     }
 
     stage('Build Application (Maven in Docker)') {
-      /*
-       * Run only this stage inside a Maven+JDK17 container.
-       * Reuse the same node workspace and mount ~/.m2 to cache deps.
-       */
       agent {
         docker {
           image 'maven:3.9-eclipse-temurin-17'
@@ -44,9 +40,11 @@ pipeline {
 
     stage('Push to Docker Hub') {
       steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub',
-                                          usernameVariable: 'DOCKERHUB_USER',
-                                          passwordVariable: 'DOCKERHUB_PASS')]) {
+        withCredentials([usernamePassword(
+          credentialsId: 'dockerhub',
+          usernameVariable: 'DOCKERHUB_USER',
+          passwordVariable: 'DOCKERHUB_PASS'
+        )]) {
           sh '''
             echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
             docker push "$DOCKER_HUB_REPO:latest"
@@ -57,14 +55,14 @@ pipeline {
 
     stage('Deploy to EC2') {
       steps {
-        // Use the SSH private key credential to run remote commands
         sshagent(credentials: ['ec2-ssh']) {
-          sh """
-            ssh -o StrictHostKeyChecking=no "$DEPLOY_SERVER" <<EOF
+          sh '''
+            ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} << 'ENDSSH'
               set -e
-              REPO="$DOCKER_HUB_REPO"
 
+              # Install Docker if not present
               if ! command -v docker >/dev/null 2>&1; then
+                echo "Docker not found. Installing Docker..."
                 if command -v yum >/dev/null 2>&1; then
                   sudo yum -y update
                   sudo yum -y install docker
@@ -77,20 +75,38 @@ pipeline {
                 sudo systemctl enable docker
                 sudo systemctl start docker
                 sudo usermod -aG docker ec2-user || true
+                echo "✅ Docker installed successfully!"
+              else
+                echo "✅ Docker already installed!"
               fi
 
-              sudo docker pull "\$REPO:latest"
-              sudo docker rm -f helloaws || true
-              sudo docker run -d -p 8080:8080 --name helloaws --restart=always "\$REPO:latest"
-            EOF
-          """
+              # Pull latest image and deploy
+              echo "Pulling latest Docker image..."
+              sudo docker pull nkorganci/hello-aws:latest
+
+              echo "Stopping and removing old container..."
+              sudo docker stop helloaws 2>/dev/null || true
+              sudo docker rm helloaws 2>/dev/null || true
+
+              echo "Starting new container..."
+              sudo docker run -d -p 8080:8080 --name helloaws --restart=always nkorganci/hello-aws:latest
+
+              echo "✅ Deployment complete!"
+              echo "Application is running at http://52.34.164.46:8080"
+ENDSSH
+          '''
         }
       }
     }
   }
 
   post {
-    success { echo "✅ Deployment Successful!" }
-    failure { echo "❌ Deployment Failed!" }
+    success {
+      echo "✅ Deployment Successful!"
+      echo "Access your application at: http://52.34.164.46:8080"
+    }
+    failure {
+      echo "❌ Deployment Failed!"
+    }
   }
 }
