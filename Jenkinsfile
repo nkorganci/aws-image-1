@@ -1,11 +1,14 @@
 pipeline {
   agent any
 
+  options {
+    timestamps()
+    skipDefaultCheckout(true)
+  }
+
   environment {
     DOCKER_HUB_REPO = 'nkorganci/hello-aws'
     DEPLOY_SERVER   = 'ec2-user@52.34.164.46'
-    SSH_KEY         = credentials('ec2-ssh')
-    DOCKER_HUB_CRED = credentials('dockerhub')
   }
 
   stages {
@@ -16,11 +19,14 @@ pipeline {
     }
 
     stage('Build Application (Maven in Docker)') {
-      /* Run just this stage inside a Maven+JDK17 container,
-         mounting the current workspace into the container */
+      /*
+       * Run only this stage inside a Maven+JDK17 container.
+       * Reuse the same node workspace and mount ~/.m2 to cache deps.
+       */
       agent {
         docker {
           image 'maven:3.9-eclipse-temurin-17'
+          args '-v $HOME/.m2:/root/.m2'
           reuseNode true
         }
       }
@@ -32,38 +38,53 @@ pipeline {
 
     stage('Build Docker Image') {
       steps {
-        sh 'docker build -t $DOCKER_HUB_REPO:latest .'
+        sh 'docker build -t "$DOCKER_HUB_REPO:latest" .'
       }
     }
 
     stage('Push to Docker Hub') {
       steps {
-        sh '''
-          echo $DOCKER_HUB_CRED_PSW | docker login -u $DOCKER_HUB_CRED_USR --password-stdin
-          docker push $DOCKER_HUB_REPO:latest
-        '''
+        withCredentials([usernamePassword(credentialsId: 'dockerhub',
+                                          usernameVariable: 'DOCKERHUB_USER',
+                                          passwordVariable: 'DOCKERHUB_PASS')]) {
+          sh '''
+            echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
+            docker push "$DOCKER_HUB_REPO:latest"
+          '''
+        }
       }
     }
 
     stage('Deploy to EC2') {
       steps {
-        sh '''
-        ssh -o StrictHostKeyChecking=no -i $SSH_KEY $DEPLOY_SERVER << 'EOF'
-        # Install Docker on Amazon Linux if missing, then deploy latest image
-        if ! command -v docker >/dev/null 2>&1; then
-          sudo yum update -y
-          sudo yum install -y docker
-          sudo service docker start
-          sudo systemctl enable docker
-          sudo usermod -aG docker ec2-user
-        fi
+        // Use the SSH private key credential to run remote commands
+        sshagent(credentials: ['ec2-ssh']) {
+          sh """
+            ssh -o StrictHostKeyChecking=no "$DEPLOY_SERVER" <<EOF
+              set -e
+              REPO="$DOCKER_HUB_REPO"
 
-        docker pull $DOCKER_HUB_REPO:latest
-        docker stop helloaws || true
-        docker rm helloaws || true
-        docker run -d -p 8080:8080 --name helloaws --restart always $DOCKER_HUB_REPO:latest
-        EOF
-        '''
+              if ! command -v docker >/dev/null 2>&1; then
+                if command -v yum >/dev/null 2>&1; then
+                  sudo yum -y update
+                  sudo yum -y install docker
+                elif command -v dnf >/dev/null 2>&1; then
+                  sudo dnf -y install docker
+                elif command -v apt-get >/dev/null 2>&1; then
+                  sudo apt-get update -y
+                  sudo apt-get install -y docker.io
+                fi
+                sudo systemctl enable docker
+                sudo systemctl start docker
+                sudo usermod -aG docker ec2-user || true
+              fi
+
+              sudo docker pull "\$REPO:latest"
+              sudo docker rm -f helloaws || true
+              sudo docker run -d -p 8080:8080 --name helloaws --restart=always "\$REPO:latest"
+            EOF
+          """
+        }
       }
     }
   }
