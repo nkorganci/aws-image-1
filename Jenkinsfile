@@ -2,16 +2,34 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_HUB_REPO = 'nkorganci/hello-aws'             // Docker Hub repo
-        DEPLOY_SERVER   = 'ec2-user@52.34.164.46'           // EC2 public IP
-        SSH_KEY         = credentials('ec2-ssh')            // Jenkins SSH key ID
-        DOCKER_HUB_CRED = credentials('dockerhub')          // Docker Hub credentials
+        DOCKER_HUB_REPO = 'nkorganci/hello-aws'
+        DEPLOY_SERVER   = 'ec2-user@52.34.164.46'
+        SSH_KEY         = credentials('ec2-ssh')
+        DOCKER_HUB_CRED = credentials('dockerhub')
     }
 
     stages {
         stage('Checkout Code') {
             steps {
                 git branch: 'main', url: 'https://github.com/nkorganci/aws-image-1.git'
+            }
+        }
+
+        stage('Build Application') {
+            steps {
+                script {
+                    // Install Maven if not available
+                    sh '''
+                    if ! command -v mvn &> /dev/null
+                    then
+                        echo "Installing Maven..."
+                        apt-get update -y || sudo yum update -y
+                        apt-get install -y maven || sudo yum install -y maven
+                    fi
+                    echo "Building Java project..."
+                    mvn clean package -DskipTests
+                    '''
+                }
             }
         }
 
