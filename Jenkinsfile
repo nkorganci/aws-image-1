@@ -2,8 +2,8 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_HUB_REPO = 'nkorganci/hello-aws'             // your Docker Hub repo
-        DEPLOY_SERVER   = 'ec2-user@52.34.164.46'           // your EC2 public IP
+        DOCKER_HUB_REPO = 'nkorganci/hello-aws'             // Docker Hub repo
+        DEPLOY_SERVER   = 'ec2-user@52.34.164.46'           // EC2 public IP
         SSH_KEY         = credentials('ec2-ssh')            // Jenkins SSH key ID
         DOCKER_HUB_CRED = credentials('dockerhub')          // Docker Hub credentials
     }
@@ -26,8 +26,10 @@ pipeline {
         stage('Push to Docker Hub') {
             steps {
                 script {
-                    sh 'echo $DOCKER_HUB_CRED_PSW | docker login -u $DOCKER_HUB_CRED_USR --password-stdin'
-                    sh 'docker push $DOCKER_HUB_REPO:latest'
+                    sh '''
+                    echo $DOCKER_HUB_CRED_PSW | docker login -u $DOCKER_HUB_CRED_USR --password-stdin
+                    docker push $DOCKER_HUB_REPO:latest
+                    '''
                 }
             }
         }
@@ -37,21 +39,21 @@ pipeline {
                 script {
                     sh '''
                     ssh -o StrictHostKeyChecking=no -i $SSH_KEY $DEPLOY_SERVER << 'EOF'
-                    # 1️⃣ Update and install Docker if not present
+                    echo "🔧 Checking Docker installation..."
                     if ! command -v docker &> /dev/null
                     then
-                        echo "Docker not found. Installing Docker..."
+                        echo "🐋 Installing Docker..."
                         sudo yum update -y
                         sudo yum install -y docker
                         sudo systemctl start docker
                         sudo systemctl enable docker
                         sudo usermod -aG docker ec2-user
-                        echo "✅ Docker installed successfully!"
+                        echo "✅ Docker installed!"
                     else
-                        echo "✅ Docker already installed!"
+                        echo "✅ Docker already installed."
                     fi
 
-                    # 2️⃣ Deploy the container
+                    echo "🚀 Deploying application..."
                     docker pull $DOCKER_HUB_REPO:latest
                     docker stop helloaws || true
                     docker rm helloaws || true
