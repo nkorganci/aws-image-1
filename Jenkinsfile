@@ -59,7 +59,26 @@ pipeline {
           sh '''
             ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} << 'ENDSSH'
               set -e
-              # Install Docker if not present (omitted for brevity)...
+
+              # Install Docker if not present
+              if ! command -v docker >/dev/null 2>&1; then
+                echo "Docker not found. Installing Docker..."
+                if command -v yum >/dev/null 2>&1; then
+                  sudo yum -y update
+                  sudo yum -y install docker
+                elif command -v dnf >/dev/null 2>&1; then
+                  sudo dnf -y install docker
+                elif command -v apt-get >/dev/null 2>&1; then
+                  sudo apt-get update -y
+                  sudo apt-get install -y docker.io
+                fi
+                sudo systemctl enable docker
+                sudo systemctl start docker
+                sudo usermod -aG docker ec2-user || true
+                echo "✅ Docker installed successfully!"
+              else
+                echo "✅ Docker already installed!"
+              fi
 
               echo "Pulling latest Docker image..."
               sudo docker pull nkorganci/hello-aws:latest
@@ -68,13 +87,35 @@ pipeline {
               sudo docker stop helloaws 2>/dev/null || true
               sudo docker rm helloaws 2>/dev/null || true
 
-              echo "Starting new container with correct port mapping (8081)..."
+              echo "Starting new container with port 8081..."
               sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
 
               echo "✅ Deployment complete!"
               echo "Application is running at http://52.34.164.46:8081"
 ENDSSH
-        '''
+          '''
+        }
+      }
+    }
+
+    stage('Verify Deployment') {
+      steps {
+        script {
+          echo "Waiting for application to start..."
+          sleep(time: 15, unit: 'SECONDS')
+
+          sh '''
+            echo "Testing application endpoint..."
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://52.34.164.46:8081 || echo "000")
+
+            if [ "$RESPONSE" = "200" ] || [ "$RESPONSE" = "302" ]; then
+              echo "✅ Application is responding! (HTTP $RESPONSE)"
+            else
+              echo "⚠️ Application returned HTTP $RESPONSE"
+              echo "Check application logs with: sudo docker logs helloaws"
+            fi
+          '''
+        }
       }
     }
   }
