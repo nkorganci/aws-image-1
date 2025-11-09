@@ -45,7 +45,7 @@ variable "instance_type" {
 variable "ami_id" {
   description = "AMI ID to use for EC2 instance (set this per-region before apply)"
   type        = string
-  default     = ""
+  default     = "ami-0157af9aea2eef346"
 }
 
 variable "ssh_user" {
