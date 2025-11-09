@@ -8,7 +8,7 @@ pipeline {
 
   environment {
     DOCKER_HUB_REPO = 'nkorganci/hello-aws'
-    DEPLOY_SERVER   = 'ec2-user@52.34.164.46'
+    DEPLOY_SERVER   = 'ec2-user@52.72.171.78'
   }
 
   stages {
