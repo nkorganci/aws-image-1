@@ -91,7 +91,7 @@ pipeline {
               sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
 
               echo "✅ Deployment complete!"
-              echo "Application is running at http://52.34.164.46:8081"
+              echo "Application is running at http://52.72.171.78:8081"
 ENDSSH
           '''
         }
@@ -106,7 +106,7 @@ ENDSSH
 
           sh '''
             echo "Testing application endpoint..."
-            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://52.34.164.46:8081 || echo "000")
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://52.72.171.78:8081 || echo "000")
 
             if [ "$RESPONSE" = "200" ] || [ "$RESPONSE" = "302" ]; then
               echo "✅ Application is responding! (HTTP $RESPONSE)"
@@ -123,7 +123,7 @@ ENDSSH
   post {
     success {
       echo "✅ Deployment Successful!"
-      echo "Access your application at: http://52.34.164.46:8081"
+      echo "Access your application at: http://52.72.171.78:8081"
     }
     failure {
       echo "❌ Deployment Failed!"
