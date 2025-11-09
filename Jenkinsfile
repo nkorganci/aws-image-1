@@ -61,17 +61,21 @@ pipeline {
     }
 
     stage('Deploy to EC2') {
+      agent {
+        docker {
+          image 'amazonlinux:2'
+          args '-u root:root'
+        }
+      }
       steps {
         // Use Jenkins AWS credentials (ID = secret-id) to allow AWS CLI to call SSM
         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'secret-id']]) {
           sh '''
             set -e
 
-            # Ensure AWS CLI is available on the agent
-            if ! command -v aws >/dev/null 2>&1; then
-              echo "AWS CLI not found on agent. Install it or run this job on an agent with AWS CLI."
-              exit 1
-            fi
+            # Install awscli and openssh-client inside the container (ephemeral)
+            yum -y install python3 openssh-clients || true
+            python3 -m pip install --upgrade pip awscli || true
 
             # Fetch private key from SSM Parameter Store (SecureString) and write to a secure file
             echo "Fetching private key from SSM: $SSM_PARAM_NAME"
@@ -117,7 +121,7 @@ pipeline {
 ENDSSH
 
             # Cleanup private key from the agent
-            shred -u ec2-key.pem || rm -f ec2-key.pem
+            rm -f ec2-key.pem
           '''
         }
       }
