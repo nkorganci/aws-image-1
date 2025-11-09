@@ -112,10 +112,54 @@ resource "aws_instance" "app_server" {
   tags = {
     Name = "${var.project_name}-server"
   }
+
+  # Attach the IAM instance profile that allows SSM to manage the instance
+  iam_instance_profile = aws_iam_instance_profile.ec2_ssm_profile.name
 }
 
 resource "local_file" "private_key" {
   content         = tls_private_key.ec2_key.private_key_pem
   filename        = "${path.module}/ec2-key.pem"
   file_permission = "0400"
+}
+
+# Add IAM role for EC2 to allow AWS Systems Manager
+resource "aws_iam_role" "ec2_ssm_role" {
+  name = "${var.project_name}-ec2-ssm-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = "sts:AssumeRole",
+        Effect = "Allow",
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_managed" {
+  role       = aws_iam_role.ec2_ssm_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "ec2_ssm_profile" {
+  name = "${var.project_name}-ec2-ssm-profile"
+  role = aws_iam_role.ec2_ssm_role.name
+}
+
+# Store the generated private key into SSM Parameter Store (SecureString)
+resource "aws_ssm_parameter" "ec2_private_key" {
+  name        = "/${var.project_name}/ec2/private_key"
+  description = "Private key for EC2 instance ${aws_instance.app_server.id}"
+  type        = "SecureString"
+  overwrite   = true
+  value       = tls_private_key.ec2_key.private_key_pem
+
+  tags = {
+    Name = "${var.project_name}-ec2-private-key"
+  }
 }

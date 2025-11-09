@@ -33,6 +33,16 @@ output "private_key_path" {
   value       = local_file.private_key.filename
 }
 
+output "ssm_private_key_name" {
+  description = "SSM Parameter name that stores the EC2 private key (SecureString)"
+  value       = aws_ssm_parameter.ec2_private_key.name
+}
+
+output "ssm_private_key_arn" {
+  description = "ARN of the SSM Parameter that stores the EC2 private key"
+  value       = aws_ssm_parameter.ec2_private_key.arn
+}
+
 output "ssh_command" {
   description = "Command to SSH into the instance"
   value       = "ssh -i ${local_file.private_key.filename} ${var.ssh_user}@${aws_instance.app_server.public_ip}"

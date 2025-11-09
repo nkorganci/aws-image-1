@@ -8,7 +8,14 @@ pipeline {
 
   environment {
     DOCKER_HUB_REPO = 'nkorganci/hello-aws'
-    DEPLOY_SERVER   = 'ec2-user@52.72.171.78'
+    DEPLOY_USER     = 'ec2-user'
+    DEPLOY_HOST     = '52.72.171.78' // keep existing IP or replace with Terraform output in your setup
+    DEPLOY_SERVER   = "${DEPLOY_USER}@${DEPLOY_HOST}"
+
+    // SSM parameter that stores the EC2 private key. Update if your project name is different.
+    SSM_PARAM_NAME  = '/aws-image-1/ec2/private_key' // ASSUMPTION: var.project_name = aws-image-1 — change if needed
+
+    AWS_REGION      = 'us-east-1' // change to your AWS region if different
   }
 
   stages {
@@ -55,9 +62,24 @@ pipeline {
 
     stage('Deploy to EC2') {
       steps {
-        sshagent(credentials: ['ec2-ssh']) {
+        // Use Jenkins AWS credentials (ID = secret-id) to allow AWS CLI to call SSM
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'secret-id']]) {
           sh '''
-            ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} << 'ENDSSH'
+            set -e
+
+            # Ensure AWS CLI is available on the agent
+            if ! command -v aws >/dev/null 2>&1; then
+              echo "AWS CLI not found on agent. Install it or run this job on an agent with AWS CLI."
+              exit 1
+            fi
+
+            # Fetch private key from SSM Parameter Store (SecureString) and write to a secure file
+            echo "Fetching private key from SSM: $SSM_PARAM_NAME"
+            aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_NAME" --with-decryption --query Parameter.Value --output text > ec2-key.pem
+            chmod 400 ec2-key.pem
+
+            # SSH into the target EC2 instance using the retrieved private key and deploy
+            ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
               set -e
 
               # Install Docker if not present
@@ -93,6 +115,9 @@ pipeline {
               echo "✅ Deployment complete!"
               echo "Application is running at http://52.72.171.78:8081"
 ENDSSH
+
+            # Cleanup private key from the agent
+            shred -u ec2-key.pem || rm -f ec2-key.pem
           '''
         }
       }
@@ -106,7 +131,7 @@ ENDSSH
 
           sh '''
             echo "Testing application endpoint..."
-            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://52.72.171.78:8081 || echo "000")
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST}:8081 || echo "000")
 
             if [ "$RESPONSE" = "200" ] || [ "$RESPONSE" = "302" ]; then
               echo "✅ Application is responding! (HTTP $RESPONSE)"
@@ -123,7 +148,7 @@ ENDSSH
   post {
     success {
       echo "✅ Deployment Successful!"
-      echo "Access your application at: http://52.72.171.78:8081"
+      echo "Access your application at: http://${DEPLOY_HOST}:8081"
     }
     failure {
       echo "❌ Deployment Failed!"
