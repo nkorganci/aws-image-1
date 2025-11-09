@@ -9,7 +9,7 @@ pipeline {
   environment {
     DOCKER_HUB_REPO = 'nkorganci/hello-aws'
     DEPLOY_USER     = 'ec2-user'
-    DEPLOY_HOST     = '52.72.171.78' // keep existing IP or replace with Terraform output in your setup
+    DEPLOY_HOST     = '3.237.233.22' // keep existing IP or replace with Terraform output in your setup
     DEPLOY_SERVER   = "${DEPLOY_USER}@${DEPLOY_HOST}"
 
     // SSM parameter that stores the EC2 private key. Update if your project name is different.
@@ -113,7 +113,7 @@ pipeline {
               sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
 
               echo "✅ Deployment complete!"
-              echo "Application is running at http://52.72.171.78:8081"
+              echo "Application is running at http://3.237.233.22:8081"
 ENDSSH
 
             # Cleanup private key from the agent
