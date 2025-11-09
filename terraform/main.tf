@@ -153,7 +153,9 @@ resource "aws_iam_instance_profile" "ec2_ssm_profile" {
 
 # Store the generated private key into SSM Parameter Store (SecureString)
 resource "aws_ssm_parameter" "ec2_private_key" {
-  name        = "/${var.project_name}/ec2/private_key"
+  # Avoid using a top-level token that starts with the reserved prefix 'aws'.
+  # Use a non-reserved top-level namespace (for example: /app/<project>/...)
+  name        = "/app/${var.project_name}/ec2/private_key"
   description = "Private key for EC2 instance ${aws_instance.app_server.id}"
   type        = "SecureString"
   overwrite   = true

@@ -13,7 +13,7 @@ pipeline {
     DEPLOY_SERVER   = "${DEPLOY_USER}@${DEPLOY_HOST}"
 
     // SSM parameter that stores the EC2 private key. Update if your project name is different.
-    SSM_PARAM_NAME  = '/aws-image-1/ec2/private_key' // ASSUMPTION: var.project_name = aws-image-1 — change if needed
+    SSM_PARAM_NAME  = '/app/aws-image-1/ec2/private_key' // updated to match Terraform SSM path (avoid reserved 'aws')
 
     AWS_REGION      = 'us-east-1' // change to your AWS region if different
   }
