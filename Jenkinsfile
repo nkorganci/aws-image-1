@@ -215,30 +215,35 @@ pipeline {
 
       steps {
         script {
-          // WHAT: Uses AWS CLI with credentials from local Windows machine
-          // WHY: Jenkins running on Windows localhost can access AWS credentials
-          // AUTHENTICATION: Uses AWS credentials from C:\Users\USERNAME\.aws\credentials
-          // NOTE: Requires AWS CLI installed on local machine (aws configure already done)
+          // WHAT: Retrieves EC2 public IP from AWS SSM Parameter Store
+          // WHY: IP changes when instance restarts, need dynamic lookup
+          // AUTHENTICATION: Mounts Windows AWS credentials directory into container
+          // NOTE: For Windows localhost Jenkins, maps C:\Users\USERNAME\.aws to container
 
           def isWindows = isUnix() ? false : true
+          def homeDir = isWindows ? '%USERPROFILE%' : '$HOME'
 
-          if (isWindows) {
-            // Windows: Use local AWS CLI directly
+          // Detect Windows user home directory
+          def windowsHome = isWindows ? bat(
+            script: '@echo off && echo %USERPROFILE%',
+            returnStdout: true
+          ).trim() : ''
+
+          if (isWindows && windowsHome) {
+            // Windows: Mount local .aws directory into container
             env.DEPLOY_HOST = bat(
-              script: "@echo off && aws ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text --region ${AWS_REGION}",
+              script: """@echo off && docker run --rm -v "${windowsHome}\\.aws:/root/.aws:ro" -e AWS_DEFAULT_REGION=${AWS_REGION} amazon/aws-cli:latest ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text --region ${AWS_REGION}""",
               returnStdout: true
             ).trim()
           } else {
-            // Linux/Mac: Use docker with credentials
+            // Linux/Mac: Mount ~/.aws or use IAM role
             env.DEPLOY_HOST = sh(
               script: """
-                docker run --rm \
-                  -e AWS_ACCESS_KEY_ID=\$(aws configure get aws_access_key_id 2>/dev/null || echo "") \
-                  -e AWS_SECRET_ACCESS_KEY=\$(aws configure get aws_secret_access_key 2>/dev/null || echo "") \
-                  -e AWS_SESSION_TOKEN=\$(aws configure get aws_session_token 2>/dev/null || echo "") \
-                  -e AWS_DEFAULT_REGION=${AWS_REGION} \
-                  amazon/aws-cli:latest \
-                  ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text
+                if [ -d "\$HOME/.aws" ]; then
+                  docker run --rm -v \$HOME/.aws:/root/.aws:ro -e AWS_DEFAULT_REGION=${AWS_REGION} amazon/aws-cli:latest ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text
+                else
+                  docker run --rm --network host -e AWS_DEFAULT_REGION=${AWS_REGION} amazon/aws-cli:latest ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text
+                fi
               """,
               returnStdout: true
             ).trim()
@@ -257,39 +262,37 @@ pipeline {
         script {
           def isWindows = isUnix() ? false : true
 
-          if (isWindows) {
-            // Windows: Use PowerShell and local AWS CLI
-            bat '''
+          // Detect Windows user home directory
+          def windowsHome = isWindows ? bat(
+            script: '@echo off && echo %USERPROFILE%',
+            returnStdout: true
+          ).trim() : ''
+
+          if (isWindows && windowsHome) {
+            // Windows: Mount .aws directory and use Git Bash for SSH
+            bat """
               @echo off
 
-              REM Fetch SSH private key from SSM
-              aws ssm get-parameter --name %SSM_PARAM_PRIVATE_KEY% --with-decryption --query Parameter.Value --output text --region %AWS_REGION% > ec2-key.pem
+              REM Fetch SSH private key from SSM using mounted credentials
+              docker run --rm -v "${windowsHome}\\.aws:/root/.aws:ro" -e AWS_DEFAULT_REGION=${AWS_REGION} amazon/aws-cli:latest ssm get-parameter --name ${SSM_PARAM_PRIVATE_KEY} --with-decryption --query Parameter.Value --output text --region ${AWS_REGION} > ec2-key.pem
 
-              REM Deploy to EC2 via SSH (using Git Bash ssh if available)
-              bash -c "chmod 400 ec2-key.pem && ssh -o StrictHostKeyChecking=no -i ec2-key.pem %DEPLOY_USER%@%DEPLOY_HOST% 'set -e && sudo docker pull nkorganci/hello-aws:latest && sudo docker stop helloaws 2>/dev/null || true && sudo docker rm helloaws 2>/dev/null || true && sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest && echo Deployment complete'"
+              REM Deploy to EC2 via SSH using Git Bash
+              bash -c "chmod 400 ec2-key.pem && ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST} 'set -e && sudo docker pull nkorganci/hello-aws:latest && sudo docker stop helloaws 2>/dev/null || true && sudo docker rm helloaws 2>/dev/null || true && sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest && echo Deployment complete'"
 
               REM Cleanup
               del ec2-key.pem
-            '''
+            """
           } else {
-            // Linux/Mac: Original shell script
+            // Linux/Mac: Mount ~/.aws or use IAM role
             sh '''
               set -e
 
-              # Get AWS credentials from host
-              export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id 2>/dev/null || echo "")
-              export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key 2>/dev/null || echo "")
-              export AWS_SESSION_TOKEN=$(aws configure get aws_session_token 2>/dev/null || echo "")
-              export AWS_DEFAULT_REGION="$AWS_REGION"
-
               # Fetch SSH private key from SSM
-              docker run --rm \
-                -e AWS_ACCESS_KEY_ID \
-                -e AWS_SECRET_ACCESS_KEY \
-                -e AWS_SESSION_TOKEN \
-                -e AWS_DEFAULT_REGION \
-                amazon/aws-cli:latest \
-                ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
+              if [ -d "$HOME/.aws" ]; then
+                docker run --rm -v $HOME/.aws:/root/.aws:ro -e AWS_DEFAULT_REGION="$AWS_REGION" amazon/aws-cli:latest ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
+              else
+                docker run --rm --network host -e AWS_DEFAULT_REGION="$AWS_REGION" amazon/aws-cli:latest ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
+              fi
 
               chmod 400 ec2-key.pem
 
