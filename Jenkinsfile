@@ -220,10 +220,13 @@ pipeline {
           // WHY: No need to install AWS CLI on Jenkins
           // WITHOUT: Requires AWS CLI installed on Jenkins server
 
-          args '-v $HOME/.aws:/root/.aws --entrypoint=""'
-          // WHAT: Mounts AWS credentials and overrides entrypoint
-          // WHY: Shares AWS credentials from Jenkins, allows shell commands
-          // WITHOUT: Cannot authenticate with AWS
+          args '--network host --entrypoint=""'
+          // WHAT: Uses host network and overrides entrypoint
+          // WHY:
+          //   --network host: Accesses EC2 instance metadata for IAM role
+          //   --entrypoint="": Allows running shell commands
+          // AUTHENTICATION: Uses IAM instance profile attached to Jenkins EC2
+          // WITHOUT: Cannot authenticate with AWS (no credentials found)
 
           reuseNode true
           // WHAT: Uses same workspace as main pipeline
@@ -237,6 +240,9 @@ pipeline {
             script: "aws --region ${AWS_REGION} ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text",
             returnStdout: true
           ).trim()
+          // WHAT: Fetches EC2 public IP from SSM using IAM role credentials
+          // WHY: IAM role provides temporary credentials automatically
+          // NO MANUAL CREDENTIALS NEEDED: Uses EC2 instance metadata service
 
           echo "✅ Deploying to: ${env.DEPLOY_HOST}"
         }
@@ -250,13 +256,16 @@ pipeline {
       agent {
         docker {
           image 'amazon/aws-cli:latest'
-          // WHAT: AWS CLI Docker image with SSH client
-          // WHY: Provides both AWS CLI and SSH tools
+          // WHAT: AWS CLI Docker image for fetching SSH key and deploying
+          // WHY: Provides AWS CLI and we'll install SSH
           // WITHOUT: Need both tools installed on Jenkins
 
-          args '-v $HOME/.aws:/root/.aws --entrypoint=""'
-          // WHAT: Mounts AWS credentials, overrides entrypoint
-          // WHY: Access to AWS credentials, run shell commands
+          args '--network host --entrypoint=""'
+          // WHAT: Uses host network, overrides entrypoint
+          // WHY:
+          //   --network host: Accesses EC2 metadata for IAM role
+          //   --entrypoint="": Run shell commands
+          // AUTHENTICATION: Uses IAM instance profile (no manual credentials)
 
           reuseNode true
           // WHAT: Uses same workspace
@@ -271,7 +280,7 @@ pipeline {
           # Install OpenSSH client in the container
           yum install -y openssh-clients
 
-          # Fetch SSH private key from SSM
+          # Fetch SSH private key from SSM using IAM role
           aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
           chmod 400 ec2-key.pem
 
