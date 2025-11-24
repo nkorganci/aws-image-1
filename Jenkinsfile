@@ -213,33 +213,32 @@ pipeline {
       // WHAT: Retrieves current EC2 public IP from AWS SSM Parameter Store
       // WHY: IP address changes when EC2 restarts/recreates, need dynamic lookup
 
+      agent {
+        docker {
+          image 'amazon/aws-cli:latest'
+          // WHAT: Official AWS CLI Docker image
+          // WHY: No need to install AWS CLI on Jenkins
+          // WITHOUT: Requires AWS CLI installed on Jenkins server
+
+          args '-v $HOME/.aws:/root/.aws --entrypoint=""'
+          // WHAT: Mounts AWS credentials and overrides entrypoint
+          // WHY: Shares AWS credentials from Jenkins, allows shell commands
+          // WITHOUT: Cannot authenticate with AWS
+
+          reuseNode true
+          // WHAT: Uses same workspace as main pipeline
+          // WHY: Access to workspace files and environment variables
+        }
+      }
+
       steps {
         script {
-          // WHAT: Allows Groovy scripting within declarative pipeline
-          // WHY: Needed for advanced logic like variable assignment
-          // WITHOUT: Cannot assign result to environment variable
-
           env.DEPLOY_HOST = sh(
             script: "aws --region ${AWS_REGION} ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text",
             returnStdout: true
           ).trim()
-          // WHAT: Calls AWS CLI to fetch EC2 IP from SSM Parameter Store
-          // WHY:
-          //   --region: Specifies AWS region
-          //   get-parameter: Retrieves single SSM parameter
-          //   --name: SSM parameter path
-          //   --query Parameter.Value: Extracts only the value
-          //   --output text: Returns plain text (not JSON)
-          //   returnStdout: Captures command output
-          //   .trim(): Removes trailing newline
-          // WITHOUT: Would need to hardcode IP, breaks when EC2 recreated
-          // AUTHENTICATION: Uses IAM role attached to Jenkins EC2 instance
-          // REQUIREMENT: Jenkins EC2 must have IAM role with SSM read permissions
 
           echo "✅ Deploying to: ${env.DEPLOY_HOST}"
-          // WHAT: Logs the IP address for debugging
-          // WHY: Helps verify correct EC2 instance is targeted
-          // BEST PRACTICE: Always log important variables for troubleshooting
         }
       }
     }
@@ -248,12 +247,35 @@ pipeline {
       // WHAT: Connects to EC2 via SSH and deploys Docker container
       // WHY: Automates deployment, no manual SSH required
 
+      agent {
+        docker {
+          image 'amazon/aws-cli:latest'
+          // WHAT: AWS CLI Docker image with SSH client
+          // WHY: Provides both AWS CLI and SSH tools
+          // WITHOUT: Need both tools installed on Jenkins
+
+          args '-v $HOME/.aws:/root/.aws --entrypoint=""'
+          // WHAT: Mounts AWS credentials, overrides entrypoint
+          // WHY: Access to AWS credentials, run shell commands
+
+          reuseNode true
+          // WHAT: Uses same workspace
+          // WHY: Access environment variables from previous stages
+        }
+      }
+
       steps {
         sh '''
           set -e
+
+          # Install OpenSSH client in the container
+          yum install -y openssh-clients
+
+          # Fetch SSH private key from SSM
           aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
           chmod 400 ec2-key.pem
 
+          # Deploy to EC2 via SSH
           ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
             set -e
             sudo docker pull nkorganci/hello-aws:latest
