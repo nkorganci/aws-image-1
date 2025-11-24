@@ -8,27 +8,60 @@ pipeline {
 
   environment {
     DOCKER_HUB_REPO = 'nkorganci/hello-aws'
-    DEPLOY_SERVER   = 'ec2-user@52.34.164.46'
+    DEPLOY_USER     = 'ec2-user'
+    DEPLOY_HOST     = '3.231.159.231' // correct dotted IPv4 address (was using dashes which is invalid)
+    DEPLOY_SERVER   = "${DEPLOY_USER}@${DEPLOY_HOST}"
+
+    // SSM parameter that stores the EC2 private key. Update if your project name is different.
+    SSM_PARAM_NAME  = '/app/aws-image-1/ec2/private_key' // updated to match Terraform SSM path (avoid reserved 'aws')
+
+    AWS_REGION      = 'us-east-1' // changed to user-requested region
+    // Jenkins AWS credential ID you added
+    AWS_CREDS_ID    = 'aws credential'
   }
 
   stages {
     stage('Checkout Code') {
       steps {
-        git branch: 'main', url: 'https://github.com/nkorganci/aws-image-1.git'
+        script {
+          echo "Cleaning workspace: try deleteDir() first"
+          try {
+            deleteDir()
+          } catch (err) {
+            echo "deleteDir() failed: ${err}"
+            echo "Falling back to docker-based cleanup as root"
+            // If docker is available, run an alpine container as root to rm -rf workspace files
+            sh '''
+              set -e
+              if command -v docker >/dev/null 2>&1; then
+                docker run --rm -v "${WORKSPACE}":/workspace -w /workspace alpine:3 sh -c 'rm -rf /workspace/* /workspace/.[!.]* /workspace/.??* || true'
+              else
+                echo "docker not available; attempting shell rm -rf (may still fail)"
+                rm -rf "${WORKSPACE}"/* || true
+                rm -rf "${WORKSPACE}"/.[!.]* || true
+              fi
+            '''
+          }
+
+          // Now perform a clean checkout
+          git branch: 'main', url: 'https://github.com/nkorganci/aws-image-1.git'
+        }
       }
     }
 
     stage('Build Application (Maven in Docker)') {
-      agent {
-        docker {
-          image 'maven:3.9-eclipse-temurin-17'
-          args '-v $HOME/.m2:/root/.m2'
-          reuseNode true
-        }
-      }
       steps {
-        sh 'mvn -v'
-        sh 'mvn -B clean package -DskipTests'
+        // Run Maven inside Docker as the current agent UID:GID so files are not created as root
+        sh '''
+          set -e
+          if command -v docker >/dev/null 2>&1; then
+            echo "Building with docker maven image as current user"
+            docker run --rm -u "$(id -u):$(id -g)" -v "$HOME/.m2":/root/.m2 -v "$WORKSPACE":/workspace -w /workspace maven:3.9-eclipse-temurin-17 mvn -B clean package -DskipTests
+          else
+            echo "docker not available; trying local mvn"
+            mvn -B clean package -DskipTests
+          fi
+        '''
       }
     }
 
@@ -54,10 +87,29 @@ pipeline {
     }
 
     stage('Deploy to EC2') {
+      agent {
+        docker {
+          image 'amazonlinux:2'
+          args '-u root:root'
+        }
+      }
       steps {
-        sshagent(credentials: ['ec2-ssh']) {
+        // Use Jenkins AWS credentials (ID = AWS_CREDS_ID) to allow AWS CLI to call SSM
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws credential']]) {
           sh '''
-            ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} << 'ENDSSH'
+            set -e
+
+            # Install awscli and openssh-client inside the container (ephemeral)
+            yum -y install python3 openssh-clients || true
+            python3 -m pip install --upgrade pip awscli || true
+
+            # Fetch private key from SSM Parameter Store (SecureString) and write to a secure file
+            echo "Fetching private key from SSM: $SSM_PARAM_NAME"
+            aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_NAME" --with-decryption --query Parameter.Value --output text > ec2-key.pem
+            chmod 400 ec2-key.pem
+
+            # SSH into the target EC2 instance using the retrieved private key and deploy
+            ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
               set -e
 
               # Install Docker if not present
@@ -91,8 +143,11 @@ pipeline {
               sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
 
               echo "✅ Deployment complete!"
-              echo "Application is running at http://52.34.164.46:8081"
+              echo "Application is running at http://3.237.233.22:8081"
 ENDSSH
+
+            # Cleanup private key from the agent
+            rm -f ec2-key.pem
           '''
         }
       }
@@ -106,7 +161,7 @@ ENDSSH
 
           sh '''
             echo "Testing application endpoint..."
-            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://52.34.164.46:8081 || echo "000")
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST}:8081 || echo "000")
 
             if [ "$RESPONSE" = "200" ] || [ "$RESPONSE" = "302" ]; then
               echo "✅ Application is responding! (HTTP $RESPONSE)"
@@ -123,7 +178,7 @@ ENDSSH
   post {
     success {
       echo "✅ Deployment Successful!"
-      echo "Access your application at: http://52.34.164.46:8081"
+      echo "Access your application at: http://${DEPLOY_HOST}:8081"
     }
     failure {
       echo "❌ Deployment Failed!"
