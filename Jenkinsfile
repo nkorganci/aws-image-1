@@ -16,11 +16,15 @@ pipeline {
     SSM_PARAM_NAME  = '/app/aws-image-1/ec2/private_key' // updated to match Terraform SSM path (avoid reserved 'aws')
 
     AWS_REGION      = 'us-east-1' // change to your AWS region if different
+    // Jenkins AWS credential ID you added
+    AWS_CREDS_ID    = 'aws credential'
   }
 
   stages {
     stage('Checkout Code') {
       steps {
+        // Ensure a clean workspace to avoid 'unable to unlink old' permission errors
+        deleteDir()
         git branch: 'main', url: 'https://github.com/nkorganci/aws-image-1.git'
       }
     }
@@ -68,8 +72,8 @@ pipeline {
         }
       }
       steps {
-        // Use Jenkins AWS credentials (ID = secret-id) to allow AWS CLI to call SSM
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'secret-id']]) {
+        // Use Jenkins AWS credentials (ID = AWS_CREDS_ID) to allow AWS CLI to call SSM
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws credential']]) {
           sh '''
             set -e
 
