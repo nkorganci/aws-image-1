@@ -165,3 +165,92 @@ resource "aws_ssm_parameter" "ec2_private_key" {
     Name = "${var.project_name}-ec2-private-key"
   }
 }
+
+# Store the EC2 instance ID in SSM Parameter Store for Jenkins
+resource "aws_ssm_parameter" "ec2_instance_id" {
+  name        = "/app/${var.project_name}/ec2/instance_id"
+  description = "EC2 instance ID for ${var.project_name}"
+  type        = "String"
+  overwrite   = true
+  value       = aws_instance.app_server.id
+
+  tags = {
+    Name = "${var.project_name}-ec2-instance-id"
+  }
+}
+
+# Store the EC2 instance public IP in SSM Parameter Store for Jenkins
+resource "aws_ssm_parameter" "ec2_public_ip" {
+  name        = "/app/${var.project_name}/ec2/public_ip"
+  description = "EC2 instance public IP for ${var.project_name}"
+  type        = "String"
+  overwrite   = true
+  value       = aws_instance.app_server.public_ip
+
+  tags = {
+    Name = "${var.project_name}-ec2-public-ip"
+  }
+}
+
+# IAM role for Jenkins server to access SSM parameters
+resource "aws_iam_role" "jenkins_ssm_role" {
+  name = "${var.project_name}-jenkins-ssm-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = "sts:AssumeRole",
+        Effect = "Allow",
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.project_name}-jenkins-ssm-role"
+  }
+}
+
+# IAM policy for Jenkins to read SSM parameters
+resource "aws_iam_role_policy" "jenkins_ssm_policy" {
+  name = "${var.project_name}-jenkins-ssm-policy"
+  role = aws_iam_role.jenkins_ssm_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "ssm:GetParameter",
+          "ssm:GetParameters",
+          "ssm:GetParametersByPath"
+        ],
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:*:parameter/app/${var.project_name}/*"
+        ]
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "ec2:DescribeInstances",
+          "ec2:DescribeInstanceStatus"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# IAM instance profile for Jenkins server
+resource "aws_iam_instance_profile" "jenkins_instance_profile" {
+  name = "${var.project_name}-jenkins-profile"
+  role = aws_iam_role.jenkins_ssm_role.name
+
+  tags = {
+    Name = "${var.project_name}-jenkins-profile"
+  }
+}

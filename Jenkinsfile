@@ -9,15 +9,18 @@ pipeline {
   environment {
     DOCKER_HUB_REPO = 'nkorganci/hello-aws'
     DEPLOY_USER     = 'ec2-user'
-    DEPLOY_HOST     = '3.231.159.231' // correct dotted IPv4 address (was using dashes which is invalid)
-    DEPLOY_SERVER   = "${DEPLOY_USER}@${DEPLOY_HOST}"
+    PROJECT_NAME    = 'aws-image-1' // Project name for SSM parameter lookups
 
-    // SSM parameter that stores the EC2 private key. Update if your project name is different.
-    SSM_PARAM_NAME  = '/app/aws-image-1/ec2/private_key' // updated to match Terraform SSM path (avoid reserved 'aws')
+    // SSM parameter paths - these will be automatically populated from Terraform outputs
+    SSM_PARAM_PRIVATE_KEY = "/app/${PROJECT_NAME}/ec2/private_key"
+    SSM_PARAM_INSTANCE_ID = "/app/${PROJECT_NAME}/ec2/instance_id"
+    SSM_PARAM_PUBLIC_IP   = "/app/${PROJECT_NAME}/ec2/public_ip"
 
-    AWS_REGION      = 'us-east-1' // changed to user-requested region
-    // Jenkins AWS credential ID you added
-    AWS_CREDS_ID    = 'aws credential'
+    AWS_REGION      = 'us-east-1'
+
+    // These will be dynamically fetched from SSM in the pipeline
+    DEPLOY_HOST     = '' // Will be set dynamically from SSM
+    INSTANCE_ID     = '' // Will be set dynamically from SSM
   }
 
   stages {
@@ -86,6 +89,29 @@ pipeline {
       }
     }
 
+    stage('Fetch EC2 Details from SSM') {
+      steps {
+        script {
+          // Automatically fetch EC2 instance details from SSM Parameter Store
+          // This uses the IAM role attached to the Jenkins EC2 instance (no manual credentials needed)
+          echo "Fetching EC2 details from AWS Systems Manager Parameter Store..."
+
+          env.DEPLOY_HOST = sh(
+            script: "aws --region ${AWS_REGION} ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text",
+            returnStdout: true
+          ).trim()
+
+          env.INSTANCE_ID = sh(
+            script: "aws --region ${AWS_REGION} ssm get-parameter --name ${SSM_PARAM_INSTANCE_ID} --query Parameter.Value --output text",
+            returnStdout: true
+          ).trim()
+
+          echo "✅ EC2 Instance ID: ${env.INSTANCE_ID}"
+          echo "✅ EC2 Public IP: ${env.DEPLOY_HOST}"
+        }
+      }
+    }
+
     stage('Deploy to EC2') {
       agent {
         docker {
@@ -94,19 +120,24 @@ pipeline {
         }
       }
       steps {
-        // Use Jenkins AWS credentials (ID = AWS_CREDS_ID) to allow AWS CLI to call SSM
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws credential']]) {
+        script {
+          // Use IAM role credentials (automatically picked up by AWS CLI)
           sh '''
             set -e
 
-            # Install awscli and openssh-client inside the container (ephemeral)
+            # Install awscli and openssh-clients inside the container (ephemeral)
             yum -y install python3 openssh-clients || true
             python3 -m pip install --upgrade pip awscli || true
 
             # Fetch private key from SSM Parameter Store (SecureString) and write to a secure file
-            echo "Fetching private key from SSM: $SSM_PARAM_NAME"
-            aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_NAME" --with-decryption --query Parameter.Value --output text > ec2-key.pem
+            echo "Fetching private key from SSM: $SSM_PARAM_PRIVATE_KEY"
+            aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
             chmod 400 ec2-key.pem
+
+            echo "Fetching current EC2 public IP from SSM: $SSM_PARAM_PUBLIC_IP"
+            DEPLOY_HOST=$(aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_PUBLIC_IP" --query Parameter.Value --output text)
+
+            echo "Deploying to EC2 instance at $DEPLOY_HOST"
 
             # SSH into the target EC2 instance using the retrieved private key and deploy
             ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
@@ -143,7 +174,7 @@ pipeline {
               sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
 
               echo "✅ Deployment complete!"
-              echo "Application is running at http://3.237.233.22:8081"
+              echo "Application is running at http://\${DEPLOY_HOST}:8081"
 ENDSSH
 
             # Cleanup private key from the agent
