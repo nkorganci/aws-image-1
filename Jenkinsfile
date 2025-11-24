@@ -217,33 +217,21 @@ pipeline {
         script {
           // WHAT: Retrieves EC2 public IP from AWS SSM Parameter Store
           // WHY: IP changes when instance restarts, need dynamic lookup
-          // AUTHENTICATION: Mounts Windows AWS credentials directory into container
-          // NOTE: For Windows localhost Jenkins, maps C:\Users\USERNAME\.aws to container
+          // AUTHENTICATION: Reads AWS credentials from Jenkins credentials or mounted volume
+          // NOTE: Uses AWS credentials stored in Jenkins with ID 'aws-credentials'
 
-          def isWindows = isUnix() ? false : true
-          def homeDir = isWindows ? '%USERPROFILE%' : '$HOME'
-
-          // Detect Windows user home directory
-          def windowsHome = isWindows ? bat(
-            script: '@echo off && echo %USERPROFILE%',
-            returnStdout: true
-          ).trim() : ''
-
-          if (isWindows && windowsHome) {
-            // Windows: Mount local .aws directory into container
-            env.DEPLOY_HOST = bat(
-              script: """@echo off && docker run --rm -v "${windowsHome}\\.aws:/root/.aws:ro" -e AWS_DEFAULT_REGION=${AWS_REGION} amazon/aws-cli:latest ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text --region ${AWS_REGION}""",
-              returnStdout: true
-            ).trim()
-          } else {
-            // Linux/Mac: Mount ~/.aws or use IAM role
+          withCredentials([
+            string(credentialsId: 'aws-access-key-id', variable: 'AWS_ACCESS_KEY_ID'),
+            string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')
+          ]) {
             env.DEPLOY_HOST = sh(
               script: """
-                if [ -d "\$HOME/.aws" ]; then
-                  docker run --rm -v \$HOME/.aws:/root/.aws:ro -e AWS_DEFAULT_REGION=${AWS_REGION} amazon/aws-cli:latest ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text
-                else
-                  docker run --rm --network host -e AWS_DEFAULT_REGION=${AWS_REGION} amazon/aws-cli:latest ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text
-                fi
+                docker run --rm \
+                  -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+                  -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+                  -e AWS_DEFAULT_REGION=${AWS_REGION} \
+                  amazon/aws-cli:latest \
+                  ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text
               """,
               returnStdout: true
             ).trim()
@@ -260,39 +248,20 @@ pipeline {
 
       steps {
         script {
-          def isWindows = isUnix() ? false : true
-
-          // Detect Windows user home directory
-          def windowsHome = isWindows ? bat(
-            script: '@echo off && echo %USERPROFILE%',
-            returnStdout: true
-          ).trim() : ''
-
-          if (isWindows && windowsHome) {
-            // Windows: Mount .aws directory and use Git Bash for SSH
-            bat """
-              @echo off
-
-              REM Fetch SSH private key from SSM using mounted credentials
-              docker run --rm -v "${windowsHome}\\.aws:/root/.aws:ro" -e AWS_DEFAULT_REGION=${AWS_REGION} amazon/aws-cli:latest ssm get-parameter --name ${SSM_PARAM_PRIVATE_KEY} --with-decryption --query Parameter.Value --output text --region ${AWS_REGION} > ec2-key.pem
-
-              REM Deploy to EC2 via SSH using Git Bash
-              bash -c "chmod 400 ec2-key.pem && ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST} 'set -e && sudo docker pull nkorganci/hello-aws:latest && sudo docker stop helloaws 2>/dev/null || true && sudo docker rm helloaws 2>/dev/null || true && sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest && echo Deployment complete'"
-
-              REM Cleanup
-              del ec2-key.pem
-            """
-          } else {
-            // Linux/Mac: Mount ~/.aws or use IAM role
+          withCredentials([
+            string(credentialsId: 'aws-access-key-id', variable: 'AWS_ACCESS_KEY_ID'),
+            string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')
+          ]) {
             sh '''
               set -e
 
-              # Fetch SSH private key from SSM
-              if [ -d "$HOME/.aws" ]; then
-                docker run --rm -v $HOME/.aws:/root/.aws:ro -e AWS_DEFAULT_REGION="$AWS_REGION" amazon/aws-cli:latest ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
-              else
-                docker run --rm --network host -e AWS_DEFAULT_REGION="$AWS_REGION" amazon/aws-cli:latest ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
-              fi
+              # Fetch SSH private key from SSM using Jenkins credentials
+              docker run --rm \
+                -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+                -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+                -e AWS_DEFAULT_REGION="$AWS_REGION" \
+                amazon/aws-cli:latest \
+                ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
 
               chmod 400 ec2-key.pem
 
@@ -324,34 +293,14 @@ ENDSSH
         // WITHOUT: Health check runs too early, shows failure even if deployment worked
         // BEST PRACTICE: Use retry logic instead of fixed sleep
 
-        script {
-          def isWindows = isUnix() ? false : true
-
-          if (isWindows) {
-            // Windows: Use curl via bash or PowerShell's Invoke-WebRequest
-            bat '''
-              @echo off
-              curl -s -o nul -w "%%{http_code}" http://%DEPLOY_HOST%:8081/hello > response.txt 2>nul || echo 000 > response.txt
-              set /p RESPONSE=<response.txt
-              if "%RESPONSE%"=="200" (
-                echo ✅ Application is responding!
-              ) else (
-                echo ⚠️ Application returned HTTP %RESPONSE%
-              )
-              del response.txt
-            '''
-          } else {
-            // Linux/Mac: Original curl command
-            sh '''
-              RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST}:8081/hello || echo "000")
-              if [ "$RESPONSE" = "200" ]; then
-                echo "✅ Application is responding!"
-              else
-                echo "⚠️ Application returned HTTP $RESPONSE"
-              fi
-            '''
-          }
-        }
+        sh '''
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST}:8081/hello || echo "000")
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ Application is responding!"
+          else
+            echo "⚠️ Application returned HTTP $RESPONSE"
+          fi
+        '''
       }
     }
   }
@@ -478,22 +427,33 @@ ENDSSH
  * ==============================================================================
  *
  * JENKINS SERVER REQUIREMENTS:
- * 1. ✅ Jenkins running on Windows localhost (or Linux/Mac - auto-detected)
- * 2. ✅ AWS CLI installed and configured (aws configure with credentials)
- * 3. ✅ Docker Desktop installed and running
- * 4. ✅ Git Bash installed (for SSH on Windows)
- * 5. ✅ Maven NOT required (uses Docker container)
- * 6. ✅ Git installed
+ * 1. ✅ Jenkins running in Docker container (on Windows/Linux/Mac)
+ * 2. ✅ Docker installed on host machine
+ * 3. ✅ Maven NOT required (uses Docker container)
+ * 4. ✅ Git installed
+ * 5. ✅ SSH available in Jenkins container (for EC2 deployment)
  *
- * FOR WINDOWS LOCALHOST:
- * - AWS credentials at C:\Users\USERNAME\.aws\credentials
- * - Git Bash for SSH functionality
- * - curl available (comes with Git Bash or Windows 10+)
+ * JENKINS CONFIGURATION (REQUIRED):
+ * You MUST add these credentials in Jenkins:
  *
- * JENKINS CONFIGURATION:
- * 1. ✅ Docker Hub credentials added: ID = 'dockerhub'
+ * 1. ✅ Docker Hub credentials
  *    Path: Manage Jenkins → Credentials → System → Global → Add Credentials
  *    Type: Username with password
+ *    ID: 'dockerhub'
+ *    Username: Your Docker Hub username
+ *    Password: Your Docker Hub password
+ *
+ * 2. ✅ AWS Access Key ID
+ *    Path: Manage Jenkins → Credentials → System → Global → Add Credentials
+ *    Type: Secret text
+ *    ID: 'aws-access-key-id'
+ *    Secret: Your AWS Access Key ID (from aws configure)
+ *
+ * 3. ✅ AWS Secret Access Key
+ *    Path: Manage Jenkins → Credentials → System → Global → Add Credentials
+ *    Type: Secret text
+ *    ID: 'aws-secret-access-key'
+ *    Secret: Your AWS Secret Access Key (from aws configure)
  *
  * AWS INFRASTRUCTURE (via Terraform):
  * 1. ✅ EC2 instance running with Docker installed
