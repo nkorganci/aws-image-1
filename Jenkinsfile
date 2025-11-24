@@ -201,14 +201,7 @@ pipeline {
 
           sh '''
             echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
-            // WHAT: Authenticates with Docker Hub
-            // WHY: --password-stdin is more secure than -p flag (doesn't show in logs)
-            // WITHOUT: Push will fail with "authentication required"
-
             docker push "$DOCKER_HUB_REPO:latest"
-            // WHAT: Uploads Docker image to Docker Hub
-            // WHY: Makes image available for EC2 to pull and run
-            // WITHOUT: EC2 cannot access image, deployment fails
           '''
         }
         // BEST PRACTICE: Logout after push to clear credentials:
@@ -258,78 +251,19 @@ pipeline {
       steps {
         sh '''
           set -e
-          // WHAT: Exit script immediately if any command fails
-          // WHY: Prevents continuing with invalid state (e.g., SSH key missing)
-          // WITHOUT: Pipeline might show success even if deployment failed
-          // BEST PRACTICE: Always use 'set -e' in deployment scripts
-
           aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
-          // WHAT: Fetches SSH private key from SSM Parameter Store (encrypted)
-          // WHY:
-          //   --with-decryption: Decrypts SecureString parameter
-          //   Saves key to temporary file for SSH use
-          // WITHOUT: Cannot SSH to EC2, deployment impossible
-          // SECURITY: Key stored encrypted in SSM, only decrypted in-transit
-          // AUTHENTICATION: Uses IAM role attached to Jenkins EC2 instance
-
           chmod 400 ec2-key.pem
-          // WHAT: Sets strict file permissions (read-only for owner)
-          // WHY: SSH requires private keys to be protected (not world-readable)
-          // WITHOUT: SSH refuses to use key, error "permissions are too open"
 
           ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
-          // WHAT: SSH into EC2 instance and execute commands
-          // WHY:
-          //   -o StrictHostKeyChecking=no: Skips host key verification (auto-accepts)
-          //   -i ec2-key.pem: Uses private key for authentication
-          //   ${DEPLOY_USER}@${DEPLOY_HOST}: SSH username and IP
-          //   << 'ENDSSH': Heredoc syntax to execute multiple commands remotely
-          // WITHOUT: Cannot access EC2 to deploy
-          // SECURITY RISK: StrictHostKeyChecking=no vulnerable to MITM attacks
-          // BEST PRACTICE: Use known_hosts file or AWS Session Manager instead of SSH
-
             set -e
-            // WHAT: Exit remote commands if any fail
-            // WHY: Prevents leaving EC2 in inconsistent state
-
             sudo docker pull nkorganci/hello-aws:latest
-            // WHAT: Downloads latest Docker image from Docker Hub to EC2
-            // WHY: Gets newest version of application
-            // WITHOUT: Would deploy old version of application
-            // NOTE: Requires Docker installed on EC2 (done by Terraform user_data)
-
             sudo docker stop helloaws 2>/dev/null || true
-            // WHAT: Stops existing Docker container named 'helloaws'
-            // WHY: Prevents port conflict when starting new container
-            // 2>/dev/null: Suppresses error if container doesn't exist
-            // || true: Continues even if stop fails (container might not exist)
-            // WITHOUT: New container fails to start (port 8081 already in use)
-
             sudo docker rm helloaws 2>/dev/null || true
-            // WHAT: Removes stopped Docker container
-            // WHY: Cleans up old container before creating new one
-            // WITHOUT: Name conflict when creating new container with same name
-
             sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
-            // WHAT: Starts new Docker container with application
-            // WHY:
-            //   -d: Runs in background (detached mode)
-            //   -p 8081:8081: Maps host port 8081 to container port 8081
-            //   --name helloaws: Names container for easy management
-            //   --restart=always: Auto-restarts if crashes or EC2 reboots
-            // WITHOUT: Application not running, users cannot access it
-            // BEST PRACTICE: Use docker-compose for multi-container apps
-
             echo "✅ Deployment complete!"
 ENDSSH
-          // WHAT: Ends heredoc, returns from remote SSH session
-          // WHY: Marks end of commands to execute on EC2
 
           rm -f ec2-key.pem
-          // WHAT: Deletes SSH private key from Jenkins workspace
-          // WHY: Security - don't leave sensitive keys on disk
-          // WITHOUT: Security vulnerability, key exposed in workspace
-          // BEST PRACTICE: Always clean up secrets after use
         '''
       }
     }
@@ -347,25 +281,11 @@ ENDSSH
 
         sh '''
           RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST}:8081/hello || echo "000")
-          // WHAT: Makes HTTP request to application endpoint
-          // WHY:
-          //   curl -s: Silent mode (no progress bar)
-          //   -o /dev/null: Discards response body
-          //   -w "%{http_code}": Prints only HTTP status code
-          //   || echo "000": Returns "000" if curl fails
-          // RESULT: Stores HTTP status code in RESPONSE variable
-          // WITHOUT: No confirmation deployment worked
-
           if [ "$RESPONSE" = "200" ]; then
             echo "✅ Application is responding!"
           else
             echo "⚠️ Application returned HTTP $RESPONSE"
           fi
-          // WHAT: Checks if HTTP status code is 200 (success)
-          // WHY: Confirms application is healthy and serving requests
-          // WITHOUT: Broken deployments might go unnoticed
-          // BEST PRACTICE: Mark build as failed if health check fails:
-          //   exit 1 in else block, or use post-deployment tests
         '''
       }
     }
