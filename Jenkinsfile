@@ -15,7 +15,7 @@ pipeline {
     // SSM parameter that stores the EC2 private key. Update if your project name is different.
     SSM_PARAM_NAME  = '/app/aws-image-1/ec2/private_key' // updated to match Terraform SSM path (avoid reserved 'aws')
 
-    AWS_REGION      = 'us-east-1' // change to your AWS region if different
+    AWS_REGION      = 'us-west-2' // changed to user-requested region
     // Jenkins AWS credential ID you added
     AWS_CREDS_ID    = 'aws credential'
   }
