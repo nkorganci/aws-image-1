@@ -9,62 +9,25 @@ pipeline {
   environment {
     DOCKER_HUB_REPO = 'nkorganci/hello-aws'
     DEPLOY_USER     = 'ec2-user'
-    PROJECT_NAME    = 'aws-image-1' // Project name for SSM parameter lookups
+    PROJECT_NAME    = 'aws-image-1'
+    AWS_REGION      = 'us-east-1'
 
-    // SSM parameter paths - these will be automatically populated from Terraform outputs
     SSM_PARAM_PRIVATE_KEY = "/app/${PROJECT_NAME}/ec2/private_key"
     SSM_PARAM_INSTANCE_ID = "/app/${PROJECT_NAME}/ec2/instance_id"
     SSM_PARAM_PUBLIC_IP   = "/app/${PROJECT_NAME}/ec2/public_ip"
-
-    AWS_REGION      = 'us-east-1'
-
-    // These will be dynamically fetched from SSM in the pipeline
-    DEPLOY_HOST     = '' // Will be set dynamically from SSM
-    INSTANCE_ID     = '' // Will be set dynamically from SSM
   }
 
   stages {
     stage('Checkout Code') {
       steps {
-        script {
-          echo "Cleaning workspace: try deleteDir() first"
-          try {
-            deleteDir()
-          } catch (err) {
-            echo "deleteDir() failed: ${err}"
-            echo "Falling back to docker-based cleanup as root"
-            // If docker is available, run an alpine container as root to rm -rf workspace files
-            sh '''
-              set -e
-              if command -v docker >/dev/null 2>&1; then
-                docker run --rm -v "${WORKSPACE}":/workspace -w /workspace alpine:3 sh -c 'rm -rf /workspace/* /workspace/.[!.]* /workspace/.??* || true'
-              else
-                echo "docker not available; attempting shell rm -rf (may still fail)"
-                rm -rf "${WORKSPACE}"/* || true
-                rm -rf "${WORKSPACE}"/.[!.]* || true
-              fi
-            '''
-          }
-
-          // Now perform a clean checkout
-          git branch: 'main', url: 'https://github.com/nkorganci/aws-image-1.git'
-        }
+        cleanWs()
+        git branch: 'main', url: 'https://github.com/nkorganci/aws-image-1.git'
       }
     }
 
-    stage('Build Application (Maven in Docker)') {
+    stage('Build Application') {
       steps {
-        // Run Maven inside Docker as the current agent UID:GID so files are not created as root
-        sh '''
-          set -e
-          if command -v docker >/dev/null 2>&1; then
-            echo "Building with docker maven image as current user"
-            docker run --rm -u "$(id -u):$(id -g)" -v "$HOME/.m2":/root/.m2 -v "$WORKSPACE":/workspace -w /workspace maven:3.9-eclipse-temurin-17 mvn -B clean package -DskipTests
-          else
-            echo "docker not available; trying local mvn"
-            mvn -B clean package -DskipTests
-          fi
-        '''
+        sh 'mvn -B clean package -DskipTests'
       }
     }
 
@@ -89,119 +52,50 @@ pipeline {
       }
     }
 
-    stage('Fetch EC2 Details from SSM') {
+    stage('Fetch EC2 Details') {
       steps {
         script {
-          // Automatically fetch EC2 instance details from SSM Parameter Store
-          // This uses the IAM role attached to the Jenkins EC2 instance (no manual credentials needed)
-          echo "Fetching EC2 details from AWS Systems Manager Parameter Store..."
-
           env.DEPLOY_HOST = sh(
             script: "aws --region ${AWS_REGION} ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text",
             returnStdout: true
           ).trim()
 
-          env.INSTANCE_ID = sh(
-            script: "aws --region ${AWS_REGION} ssm get-parameter --name ${SSM_PARAM_INSTANCE_ID} --query Parameter.Value --output text",
-            returnStdout: true
-          ).trim()
-
-          echo "✅ EC2 Instance ID: ${env.INSTANCE_ID}"
-          echo "✅ EC2 Public IP: ${env.DEPLOY_HOST}"
+          echo "✅ Deploying to: ${env.DEPLOY_HOST}"
         }
       }
     }
 
     stage('Deploy to EC2') {
-      agent {
-        docker {
-          image 'amazonlinux:2'
-          args '-u root:root'
-        }
-      }
       steps {
-        script {
-          // Use IAM role credentials (automatically picked up by AWS CLI)
-          sh '''
+        sh '''
+          aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
+          chmod 400 ec2-key.pem
+
+          ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
             set -e
-
-            # Install awscli and openssh-clients inside the container (ephemeral)
-            yum -y install python3 openssh-clients || true
-            python3 -m pip install --upgrade pip awscli || true
-
-            # Fetch private key from SSM Parameter Store (SecureString) and write to a secure file
-            echo "Fetching private key from SSM: $SSM_PARAM_PRIVATE_KEY"
-            aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
-            chmod 400 ec2-key.pem
-
-            echo "Fetching current EC2 public IP from SSM: $SSM_PARAM_PUBLIC_IP"
-            DEPLOY_HOST=$(aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_PUBLIC_IP" --query Parameter.Value --output text)
-
-            echo "Deploying to EC2 instance at $DEPLOY_HOST"
-
-            # SSH into the target EC2 instance using the retrieved private key and deploy
-            ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
-              set -e
-
-              # Install Docker if not present
-              if ! command -v docker >/dev/null 2>&1; then
-                echo "Docker not found. Installing Docker..."
-                if command -v yum >/dev/null 2>&1; then
-                  sudo yum -y update
-                  sudo yum -y install docker
-                elif command -v dnf >/dev/null 2>&1; then
-                  sudo dnf -y install docker
-                elif command -v apt-get >/dev/null 2>&1; then
-                  sudo apt-get update -y
-                  sudo apt-get install -y docker.io
-                fi
-                sudo systemctl enable docker
-                sudo systemctl start docker
-                sudo usermod -aG docker ec2-user || true
-                echo "✅ Docker installed successfully!"
-              else
-                echo "✅ Docker already installed!"
-              fi
-
-              echo "Pulling latest Docker image..."
-              sudo docker pull nkorganci/hello-aws:latest
-
-              echo "Stopping and removing old container..."
-              sudo docker stop helloaws 2>/dev/null || true
-              sudo docker rm helloaws 2>/dev/null || true
-
-              echo "Starting new container with port 8081..."
-              sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
-
-              echo "✅ Deployment complete!"
-              echo "Application is running at http://\${DEPLOY_HOST}:8081"
+            sudo docker pull nkorganci/hello-aws:latest
+            sudo docker stop helloaws 2>/dev/null || true
+            sudo docker rm helloaws 2>/dev/null || true
+            sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
+            echo "✅ Deployment complete!"
 ENDSSH
 
-            # Cleanup private key from the agent
-            rm -f ec2-key.pem
-          '''
-        }
+          rm -f ec2-key.pem
+        '''
       }
     }
 
     stage('Verify Deployment') {
       steps {
-        script {
-          echo "Waiting for application to start..."
-          sleep(time: 15, unit: 'SECONDS')
-
-          sh '''
-            echo "Testing application endpoint..."
-            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST}:8081 || echo "000")
-
-            if [ "$RESPONSE" = "200" ] || [ "$RESPONSE" = "302" ]; then
-              echo "✅ Application is responding! (HTTP $RESPONSE)"
-            else
-              echo "⚠️ Application returned HTTP $RESPONSE"
-              echo "Check application logs with: sudo docker logs helloaws"
-            fi
-          '''
-        }
+        sleep(time: 10, unit: 'SECONDS')
+        sh '''
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST}:8081/hello || echo "000")
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ Application is responding!"
+          else
+            echo "⚠️ Application returned HTTP $RESPONSE"
+          fi
+        '''
       }
     }
   }
