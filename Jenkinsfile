@@ -213,36 +213,31 @@ pipeline {
       // WHAT: Retrieves current EC2 public IP from AWS SSM Parameter Store
       // WHY: IP address changes when EC2 restarts/recreates, need dynamic lookup
 
-      agent {
-        docker {
-          image 'amazon/aws-cli:latest'
-          // WHAT: Official AWS CLI Docker image
-          // WHY: No need to install AWS CLI on Jenkins
-          // WITHOUT: Requires AWS CLI installed on Jenkins server
-
-          args '--network host --entrypoint=""'
-          // WHAT: Uses host network and overrides entrypoint
-          // WHY:
-          //   --network host: Accesses EC2 instance metadata for IAM role
-          //   --entrypoint="": Allows running shell commands
-          // AUTHENTICATION: Uses IAM instance profile attached to Jenkins EC2
-          // WITHOUT: Cannot authenticate with AWS (no credentials found)
-
-          reuseNode true
-          // WHAT: Uses same workspace as main pipeline
-          // WHY: Access to workspace files and environment variables
-        }
-      }
-
       steps {
         script {
+          // WHAT: Uses AWS CLI in Docker with credentials from environment
+          // WHY: Jenkins in Docker cannot access instance metadata directly
+          // AUTHENTICATION: Uses AWS credentials from Jenkins host environment
+          // NOTE: Jenkins host must have aws configure done or IAM role attached
+
           env.DEPLOY_HOST = sh(
-            script: "aws --region ${AWS_REGION} ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text",
+            script: """
+              docker run --rm \
+                -e AWS_ACCESS_KEY_ID=\$(aws configure get aws_access_key_id 2>/dev/null || echo "") \
+                -e AWS_SECRET_ACCESS_KEY=\$(aws configure get aws_secret_access_key 2>/dev/null || echo "") \
+                -e AWS_SESSION_TOKEN=\$(aws configure get aws_session_token 2>/dev/null || echo "") \
+                -e AWS_DEFAULT_REGION=${AWS_REGION} \
+                amazon/aws-cli:latest \
+                ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text
+            """,
             returnStdout: true
           ).trim()
-          // WHAT: Fetches EC2 public IP from SSM using IAM role credentials
-          // WHY: IAM role provides temporary credentials automatically
-          // NO MANUAL CREDENTIALS NEEDED: Uses EC2 instance metadata service
+          // WHAT: Runs AWS CLI in container with credentials from host
+          // WHY:
+          //   Gets AWS credentials from Jenkins host (where you ran aws configure)
+          //   Passes them as environment variables to container
+          //   AWS CLI in container uses these credentials automatically
+          // WITHOUT: Container has no credentials, "Unable to locate credentials" error
 
           echo "✅ Deploying to: ${env.DEPLOY_HOST}"
         }
@@ -253,35 +248,25 @@ pipeline {
       // WHAT: Connects to EC2 via SSH and deploys Docker container
       // WHY: Automates deployment, no manual SSH required
 
-      agent {
-        docker {
-          image 'amazon/aws-cli:latest'
-          // WHAT: AWS CLI Docker image for fetching SSH key and deploying
-          // WHY: Provides AWS CLI and we'll install SSH
-          // WITHOUT: Need both tools installed on Jenkins
-
-          args '--network host --entrypoint=""'
-          // WHAT: Uses host network, overrides entrypoint
-          // WHY:
-          //   --network host: Accesses EC2 metadata for IAM role
-          //   --entrypoint="": Run shell commands
-          // AUTHENTICATION: Uses IAM instance profile (no manual credentials)
-
-          reuseNode true
-          // WHAT: Uses same workspace
-          // WHY: Access environment variables from previous stages
-        }
-      }
-
       steps {
         sh '''
           set -e
 
-          # Install OpenSSH client in the container
-          yum install -y openssh-clients
+          # Get AWS credentials from Jenkins host
+          export AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id 2>/dev/null || echo "")
+          export AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key 2>/dev/null || echo "")
+          export AWS_SESSION_TOKEN=$(aws configure get aws_session_token 2>/dev/null || echo "")
+          export AWS_DEFAULT_REGION="$AWS_REGION"
 
-          # Fetch SSH private key from SSM using IAM role
-          aws --region "$AWS_REGION" ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
+          # Fetch SSH private key from SSM using Docker with credentials
+          docker run --rm \
+            -e AWS_ACCESS_KEY_ID \
+            -e AWS_SECRET_ACCESS_KEY \
+            -e AWS_SESSION_TOKEN \
+            -e AWS_DEFAULT_REGION \
+            amazon/aws-cli:latest \
+            ssm get-parameter --name "$SSM_PARAM_PRIVATE_KEY" --with-decryption --query Parameter.Value --output text > ec2-key.pem
+
           chmod 400 ec2-key.pem
 
           # Deploy to EC2 via SSH
