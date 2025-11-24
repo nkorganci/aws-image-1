@@ -129,6 +129,25 @@ pipeline {
       // WHAT: Compiles Java code and packages into executable JAR file
       // WHY: Creates deployable artifact from source code
 
+      agent {
+        docker {
+          image 'maven:3.9-eclipse-temurin-17'
+          // WHAT: Uses official Maven Docker image with Java 17
+          // WHY: No need to install Maven on Jenkins, self-contained build
+          // WITHOUT: Requires Maven installed on Jenkins server
+
+          args '-v $HOME/.m2:/root/.m2'
+          // WHAT: Mounts Maven local repository for caching dependencies
+          // WHY: Faster builds, doesn't re-download dependencies every time
+          // WITHOUT: Downloads all dependencies on every build (slow)
+
+          reuseNode true
+          // WHAT: Runs Maven container on same node as main pipeline
+          // WHY: Shares workspace, doesn't need to re-checkout code
+          // WITHOUT: Would checkout code again in new workspace
+        }
+      }
+
       steps {
         sh 'mvn -B clean package -DskipTests'
         // WHAT: Maven command to build Java application
@@ -141,7 +160,7 @@ pipeline {
         // BEST PRACTICE: Run tests in separate stage, don't skip them:
         //   stage('Test') { steps { sh 'mvn test' } }
         //   stage('Build') { steps { sh 'mvn -B package -DskipTests' } }
-        // NOTE: Requires Maven installed on Jenkins agent
+        // NOTE: Runs inside Maven Docker container (no local Maven needed)
       }
     }
 
