@@ -9,7 +9,7 @@ pipeline {
   environment {
     DOCKER_HUB_REPO = 'nkorganci/hello-aws'
     DEPLOY_USER     = 'ec2-user'
-    DEPLOY_HOST     = '44.211.163.19' // correct dotted IPv4 address (was using dashes which is invalid)
+    DEPLOY_HOST     = '3.231.159.231' // correct dotted IPv4 address (was using dashes which is invalid)
     DEPLOY_SERVER   = "${DEPLOY_USER}@${DEPLOY_HOST}"
 
     // SSM parameter that stores the EC2 private key. Update if your project name is different.
