@@ -55,7 +55,7 @@ pipeline {
     // WHY: Avoids conflicts when deploying to same EC2 instance
     // WITHOUT: Two deployments could run at once, causing Docker container conflicts
     // BEST PRACTICE: Essential for deployment pipelines to prevent race conditions
-    
+
   }
 
   environment {
