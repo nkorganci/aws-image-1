@@ -214,6 +214,7 @@ pipeline {
       // WHAT: Retrieves all 4 EC2 public IPs from AWS SSM Parameter Store
       // WHY: Need to deploy to all instances for load balancing
 
+
       steps {
         script {
           withCredentials([[
