@@ -118,11 +118,11 @@ pipeline {
         // WITHOUT: Old artifacts can cause build failures or incorrect deployments
         // BEST PRACTICE: Always clean before checkout for consistent builds
 
-        git branch: 'main', url: 'https://github.com/nkorganci/aws-image-1.git'
-        // WHAT: Clones the 'main' branch from GitHub repository
-        // WHY: Gets latest source code for building
+        git branch: 'image-ec2-auto-1', url: 'https://github.com/nkorganci/aws-image-1.git'
+        // WHAT: Clones the 'image-ec2-auto-1' branch from GitHub repository
+        // WHY: Gets latest source code for building from feature branch
         // WITHOUT: No source code to build, pipeline fails immediately
-        // BEST PRACTICE: Use branch parameter for flexibility: git branch: "${params.BRANCH}", url: '...'
+        // NOTE: Change back to 'main' after merging the feature branch
       }
     }
 
