@@ -94,6 +94,53 @@ resource "aws_key_pair" "ec2_key_pair" {
   # NOTE: Private key never sent to AWS (kept secure locally/in SSM)
 }
 
+resource "aws_security_group" "alb_sg" {
+  # WHAT: Security group for Application Load Balancer
+  # WHY: Controls traffic to ALB from internet
+  # WITHOUT: ALB cannot receive traffic from users
+
+  name        = "${var.project_name}-alb-sg"
+  description = "Security group for Application Load Balancer"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    description = "HTTP from Internet"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    # WHAT: Allows HTTP traffic on port 80 from anywhere
+    # WHY: Users access application through ALB on port 80
+    # WITHOUT: Users cannot reach application
+  }
+
+  ingress {
+    description = "Application Port from Internet"
+    from_port   = var.app_port
+    to_port     = var.app_port
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    # WHAT: Allows direct access to app port for testing
+    # WHY: Allows testing EC2 instances directly
+    # NOTE: Can be removed in production for security
+  }
+
+  egress {
+    description = "All traffic to VPC"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    # WHAT: Allows ALB to forward traffic to EC2 instances
+    # WHY: ALB needs to communicate with backend instances
+    # WITHOUT: ALB cannot reach EC2 instances
+  }
+
+  tags = {
+    Name = "${var.project_name}-alb-sg"
+  }
+}
+
 resource "aws_security_group" "app_sg" {
   # WHAT: Virtual firewall controlling inbound/outbound traffic to EC2
   # WHY: AWS EC2 requires security group to allow/deny network traffic
@@ -126,16 +173,25 @@ resource "aws_security_group" "app_sg" {
   }
 
   ingress {
-    description = "Application Port"
+    description     = "Application Port from ALB"
+    from_port       = var.app_port
+    to_port         = var.app_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb_sg.id]
+    # WHAT: Allows traffic only from ALB security group
+    # WHY: Best practice - EC2 instances only accept traffic from ALB
+    # WITHOUT: More secure than allowing from 0.0.0.0/0
+  }
+
+  ingress {
+    description = "Application Port from anywhere (for testing)"
     from_port   = var.app_port
     to_port     = var.app_port
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
-    # WHAT: Allows HTTP traffic on port 8081 from anywhere
-    # WHY: Users need to access Spring Boot application
-    # WITHOUT: Application running but not accessible from internet
-    # NOTE: 0.0.0.0/0 is appropriate for public web apps
-    # FOR PRIVATE APPS: Restrict to VPN or specific IPs
+    # WHAT: Allows direct access to EC2 instances
+    # WHY: Useful for testing individual instances
+    # NOTE: Can be removed in production
   }
 
   egress {
@@ -165,95 +221,45 @@ resource "aws_security_group" "app_sg" {
 }
 
 resource "aws_instance" "app_server" {
-  # WHAT: Creates EC2 virtual machine to run Docker containers
-  # WHY: Hosts the Spring Boot application
-  # WITHOUT: No server to deploy application to
+  # WHAT: Creates 4 EC2 instances across different availability zones
+  # WHY: High availability - if one AZ goes down, others still serve traffic
+  # WITHOUT: Single point of failure
+
+  count = 4
+  # WHAT: Creates 4 identical EC2 instances
+  # WHY: Distributes load across multiple instances
+  # WITHOUT: Only one instance, no redundancy
 
   ami                    = var.ami_id
-  # WHAT: Amazon Machine Image ID (operating system template)
-  # WHY: EC2 needs base OS image to boot from
-  # WITHOUT: Cannot launch EC2, no OS installed
-  # NOTE: AMI IDs are region-specific
-  # EXAMPLES:
-  #   us-east-1: ami-0c55b159cbfafe1f0 (Amazon Linux 2)
-  #   eu-west-1: ami-0d71ea30463e0ff8d (Amazon Linux 2)
-  # FIND AMI: aws ec2 describe-images --owners amazon --filters "Name=name,Values=amzn2-ami-hvm-*"
-
   instance_type          = var.instance_type
-  # WHAT: EC2 size/capacity (CPU, RAM, network)
-  # WHY: Determines performance and cost
-  # WITHOUT: Must specify, no default
-  # EXAMPLES:
-  #   t3.micro:  2 vCPU, 1 GB RAM, $0.0104/hour (Free Tier eligible)
-  #   t3.small:  2 vCPU, 2 GB RAM, $0.0208/hour
-  #   t3.medium: 2 vCPU, 4 GB RAM, $0.0416/hour
-  # BEST PRACTICE: Start small (t3.micro), scale up if needed
-
   key_name               = aws_key_pair.ec2_key_pair.key_name
-  # WHAT: Associates SSH key pair with EC2 instance
-  # WHY: Enables SSH authentication using private key
-  # WITHOUT: Cannot SSH to instance, deployment impossible
-  # NOTE: Key pair must exist in same region as EC2
-
   vpc_security_group_ids = [aws_security_group.app_sg.id]
-  # WHAT: Attaches security group firewall to EC2
-  # WHY: Controls which traffic can reach EC2
-  # WITHOUT: EC2 has no firewall rules, might use default (too restrictive)
 
-  subnet_id = module.vpc.public_subnet_ids[0]
-  # WHAT: Places EC2 in first public subnet from VPC module
-  # WHY: Public subnet has internet access (needed for SSH, app access)
-  # WITHOUT: EC2 placed in default subnet (might be private, no internet)
-  # PRIVATE SUBNET: No direct internet access, requires NAT gateway
-  # PUBLIC SUBNET: Direct internet access via Internet Gateway
+  # WHAT: Distributes instances across 4 different availability zones
+  # WHY: Each instance in different AZ for high availability
+  # count.index cycles through: 0, 1, 2, 3
+  # Availability zones: a, b, c, d (using all 4 AZs)
+  subnet_id = count.index < 2 ? module.vpc.public_subnet_ids[count.index] : module.vpc.public_subnet_ids[count.index % 2]
 
   user_data = <<-EOF
               #!/bin/bash
-              # WHAT: Script runs ONCE when EC2 first launches
-              # WHY: Automates initial setup (install Docker, configure system)
-              # WITHOUT: Must manually SSH and install Docker every time
-              # NOTE: Runs as root user automatically
-
-              set -e  # Exit on error
-              # WHAT: Stops script if any command fails
-              # WHY: Prevents continuing with broken state
-              # WITHOUT: Script continues even if Docker install fails
-
-              # Log everything
+              set -e
               exec > >(tee /var/log/user-data.log)
               exec 2>&1
-              # WHAT: Saves script output to /var/log/user-data.log
-              # WHY: Debugging - can review what happened during setup
-              # WITHOUT: No logs, hard to troubleshoot setup failures
 
               echo "Starting Docker installation..."
 
               if command -v yum &> /dev/null; then
-                # WHAT: Installs Docker on Amazon Linux / RHEL / CentOS
-                # WHY: yum is package manager for these distros
                 sudo yum update -y || echo "Yum update failed, continuing..."
                 sudo yum install -y docker || { echo "Docker install failed!"; exit 1; }
               elif command -v apt-get &> /dev/null; then
-                # WHAT: Installs Docker on Ubuntu / Debian
-                # WHY: apt-get is package manager for these distros
                 sudo apt-get update -y || echo "Apt update failed, continuing..."
                 sudo apt-get install -y docker.io || { echo "Docker install failed!"; exit 1; }
               fi
-              # WHAT: Detects OS and uses appropriate package manager
-              # WHY: Makes script work on multiple Linux distributions
-              # WITHOUT: Script only works on specific OS
 
               sudo systemctl enable docker
-              # WHAT: Configures Docker to start automatically on boot
-              # WHY: Ensures Docker runs after EC2 restarts
-              # WITHOUT: Docker doesn't start after reboot, containers stop
-
               sudo systemctl start docker
-              # WHAT: Starts Docker daemon immediately
-              # WHY: Makes Docker available for use right away
-              # WITHOUT: Docker installed but not running, cannot deploy
 
-              # Verify installation
               if command -v docker &> /dev/null; then
                 echo "✅ Docker installed successfully!"
                 docker --version
@@ -262,32 +268,137 @@ resource "aws_instance" "app_server" {
                 exit 1
               fi
 
-              # Add user to docker group
               sudo usermod -aG docker ec2-user || sudo usermod -aG docker ubuntu || true
-              # WHAT: Adds ec2-user to docker group
-              # WHY: Allows running docker commands without sudo
-              # WITHOUT: Must use sudo for every docker command
-              # NOTE: Requires logout/login to take effect
 
               echo "✅ User-data script completed!"
             EOF
-  # WHAT: End of user_data heredoc
-  # WHY: Marks end of bash script
-  # BEST PRACTICE: Keep user_data simple, complex setup better done via:
-  #   - Ansible/Chef/Puppet
-  #   - Pre-baked AMI with Docker installed
-  #   - AWS Systems Manager Run Command
 
   tags = {
-    Name = "${var.project_name}-server"
+    Name = "${var.project_name}-server-${count.index + 1}"
+    # WHAT: Names instances 1, 2, 3, 4
+    # WHY: Easy to identify which instance in AWS console
   }
 
   iam_instance_profile = aws_iam_instance_profile.ec2_ssm_profile.name
-  # WHAT: Attaches IAM role to EC2 instance
-  # WHY: Grants EC2 permissions to use AWS services (SSM in this case)
-  # WITHOUT: EC2 cannot be managed by Systems Manager
-  # USE CASE: Allows AWS SSM Session Manager for secure shell access
-  # BEST PRACTICE: Always use IAM roles, never hardcode AWS credentials on EC2
+}
+
+# ==============================================================================
+# APPLICATION LOAD BALANCER - Distributes traffic across EC2 instances
+# ==============================================================================
+
+resource "aws_lb" "app_lb" {
+  # WHAT: Application Load Balancer for distributing traffic
+  # WHY: Routes traffic to healthy instances, provides single entry point
+  # WITHOUT: Must access each EC2 instance individually
+
+  name               = "${var.project_name}-alb"
+  internal           = false
+  # WHAT: false = internet-facing ALB
+  # WHY: Users access from internet
+  # ALTERNATIVE: true = internal ALB (only from within VPC)
+
+  load_balancer_type = "application"
+  # WHAT: Layer 7 load balancer (HTTP/HTTPS)
+  # WHY: Supports path-based routing, SSL termination
+  # ALTERNATIVE: "network" for Layer 4 (TCP/UDP)
+
+  security_groups    = [aws_security_group.alb_sg.id]
+  subnets            = module.vpc.public_subnet_ids
+  # WHAT: ALB needs at least 2 subnets in different AZs
+  # WHY: High availability across multiple zones
+
+  enable_deletion_protection = false
+  # WHAT: Allows Terraform to delete ALB
+  # WHY: For testing/development
+  # PRODUCTION: Set to true to prevent accidental deletion
+
+  tags = {
+    Name = "${var.project_name}-alb"
+  }
+}
+
+resource "aws_lb_target_group" "app_tg" {
+  # WHAT: Target group containing EC2 instances
+  # WHY: ALB routes traffic to targets in this group
+  # WITHOUT: ALB has nowhere to send traffic
+
+  name     = "${var.project_name}-tg"
+  port     = var.app_port
+  protocol = "HTTP"
+  vpc_id   = module.vpc.vpc_id
+
+  health_check {
+    # WHAT: Health check configuration
+    # WHY: ALB only routes to healthy instances
+    # WITHOUT: Traffic sent to failed instances
+
+    enabled             = true
+    healthy_threshold   = 2
+    # WHAT: Instance healthy after 2 successful checks
+
+    unhealthy_threshold = 2
+    # WHAT: Instance unhealthy after 2 failed checks
+
+    timeout             = 5
+    # WHAT: Wait 5 seconds for response
+
+    interval            = 30
+    # WHAT: Check every 30 seconds
+
+    path                = "/hello"
+    # WHAT: Health check endpoint
+    # WHY: Verifies app is responding
+
+    matcher             = "200"
+    # WHAT: HTTP 200 = healthy
+  }
+
+  tags = {
+    Name = "${var.project_name}-tg"
+  }
+}
+
+resource "aws_lb_target_group_attachment" "app_tg_attachment" {
+  # WHAT: Registers each EC2 instance with target group
+  # WHY: ALB needs to know which instances to route to
+  # WITHOUT: ALB has no targets, returns 503
+
+  count            = 4
+  target_group_arn = aws_lb_target_group.app_tg.arn
+  target_id        = aws_instance.app_server[count.index].id
+  port             = var.app_port
+}
+
+resource "aws_lb_listener" "app_listener_80" {
+  # WHAT: Listener on port 80 for HTTP traffic
+  # WHY: Users access ALB on standard HTTP port
+  # WITHOUT: ALB listens but no routing rules
+
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_tg.arn
+    # WHAT: Forward all traffic to target group
+    # WHY: Distributes requests across EC2 instances
+  }
+}
+
+resource "aws_lb_listener" "app_listener_8081" {
+  # WHAT: Listener on port 8081 for direct access
+  # WHY: Allows testing ALB on same port as EC2 instances
+  # NOTE: Optional, can be removed in production
+
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = var.app_port
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_tg.arn
+  }
 }
 
 resource "local_file" "private_key" {
@@ -407,7 +518,7 @@ resource "aws_ssm_parameter" "ec2_private_key" {
   # WITHOUT: Name collision with other projects
   # BEST PRACTICE: Use hierarchical paths for organization
 
-  description = "Private key for EC2 instance ${aws_instance.app_server.id}"
+  description = "Private key for EC2 instances in ${var.project_name}"
 
   type        = "SecureString"
   # WHAT: Encrypted parameter type using AWS KMS
@@ -433,47 +544,53 @@ resource "aws_ssm_parameter" "ec2_private_key" {
   }
 }
 
-resource "aws_ssm_parameter" "ec2_instance_id" {
-  # WHAT: Stores EC2 instance ID in Parameter Store
-  # WHY: Jenkins can fetch current instance ID dynamically
-  # WITHOUT: Must manually update instance ID in Jenkins after recreation
+resource "aws_ssm_parameter" "ec2_instance_ids" {
+  # WHAT: Stores all 4 EC2 instance IDs as comma-separated list
+  # WHY: Jenkins can fetch all instance IDs for deployment
+  # WITHOUT: Must manually track multiple instance IDs
 
-  name        = "/app/${var.project_name}/ec2/instance_id"
-  description = "EC2 instance ID for ${var.project_name}"
+  count       = 4
+  name        = "/app/${var.project_name}/ec2/instance_id_${count.index + 1}"
+  description = "EC2 instance ID ${count.index + 1} for ${var.project_name}"
   type        = "String"
-  # WHAT: Plaintext parameter (not sensitive)
-  # WHY: Instance ID is not secret, no encryption needed
-  # WITHOUT: Still works, but wastes KMS decryption calls
-
   overwrite   = true
-  value       = aws_instance.app_server.id
-  # WHAT: EC2 instance ID (e.g., i-0123456789abcdef0)
-  # WHY: Changes when EC2 recreated, this auto-updates
-  # WITHOUT: Jenkins uses old instance ID, deployment fails
+  value       = aws_instance.app_server[count.index].id
 
   tags = {
-    Name = "${var.project_name}-ec2-instance-id"
+    Name = "${var.project_name}-ec2-instance-id-${count.index + 1}"
   }
 }
 
-resource "aws_ssm_parameter" "ec2_public_ip" {
-  # WHAT: Stores EC2 public IP address in Parameter Store
-  # WHY: IP changes when EC2 stops/starts, Jenkins needs current IP
-  # WITHOUT: Must manually update IP in Jenkins after every restart
+resource "aws_ssm_parameter" "ec2_public_ips" {
+  # WHAT: Stores all 4 EC2 public IPs separately
+  # WHY: Jenkins can deploy to all instances
+  # WITHOUT: Can only deploy to one instance
 
-  name        = "/app/${var.project_name}/ec2/public_ip"
-  description = "EC2 instance public IP for ${var.project_name}"
+  count       = 4
+  name        = "/app/${var.project_name}/ec2/public_ip_${count.index + 1}"
+  description = "EC2 instance ${count.index + 1} public IP for ${var.project_name}"
   type        = "String"
   overwrite   = true
-  value       = aws_instance.app_server.public_ip
-  # WHAT: Public IP address (e.g., 54.123.45.67)
-  # WHY: Required for SSH and HTTP access
-  # WITHOUT: Jenkins cannot find EC2, deployment fails
-  # NOTE: Public IP changes every time EC2 stops/starts
-  # ALTERNATIVE: Use Elastic IP for static IP (costs $0.005/hour when not attached)
+  value       = aws_instance.app_server[count.index].public_ip
 
   tags = {
-    Name = "${var.project_name}-ec2-public-ip"
+    Name = "${var.project_name}-ec2-public-ip-${count.index + 1}"
+  }
+}
+
+resource "aws_ssm_parameter" "alb_dns_name" {
+  # WHAT: Stores ALB DNS name in Parameter Store
+  # WHY: Single entry point to access all instances
+  # WITHOUT: Must remember ALB DNS name manually
+
+  name        = "/app/${var.project_name}/alb/dns_name"
+  description = "ALB DNS name for ${var.project_name}"
+  type        = "String"
+  overwrite   = true
+  value       = aws_lb.app_lb.dns_name
+
+  tags = {
+    Name = "${var.project_name}-alb-dns-name"
   }
 }
 

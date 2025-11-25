@@ -55,7 +55,7 @@ pipeline {
     // WHY: Avoids conflicts when deploying to same EC2 instance
     // WITHOUT: Two deployments could run at once, causing Docker container conflicts
     // BEST PRACTICE: Essential for deployment pipelines to prevent race conditions
-    
+
   }
 
   environment {
@@ -118,11 +118,11 @@ pipeline {
         // WITHOUT: Old artifacts can cause build failures or incorrect deployments
         // BEST PRACTICE: Always clean before checkout for consistent builds
 
-        git branch: 'main', url: 'https://github.com/nkorganci/aws-image-1.git'
-        // WHAT: Clones the 'main' branch from GitHub repository
-        // WHY: Gets latest source code for building
+        git branch: 'image-ec2-auto-1', url: 'https://github.com/nkorganci/aws-image-1.git'
+        // WHAT: Clones the 'image-ec2-auto-1' branch from GitHub repository
+        // WHY: Gets latest source code for building from feature branch
         // WITHOUT: No source code to build, pipeline fails immediately
-        // BEST PRACTICE: Use branch parameter for flexibility: git branch: "${params.BRANCH}", url: '...'
+        // NOTE: Change back to 'main' after merging the feature branch
       }
     }
 
@@ -211,43 +211,93 @@ pipeline {
     }
 
     stage('Fetch EC2 Details') {
-      // WHAT: Retrieves current EC2 public IP from AWS SSM Parameter Store
-      // WHY: IP address changes when EC2 restarts/recreates, need dynamic lookup
+      // WHAT: Retrieves all 4 EC2 public IPs from AWS SSM Parameter Store
+      // WHY: Need to deploy to all instances for load balancing
+
 
       steps {
         script {
-          // WHAT: Retrieves EC2 public IP from AWS SSM Parameter Store
-          // WHY: IP changes when instance restarts, need dynamic lookup
-          // AUTHENTICATION: Uses AWS credentials from Jenkins (kind: AWS Credentials)
-          // NOTE: Credential ID 'aws credential' automatically provides AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
-
           withCredentials([[
             $class: 'AmazonWebServicesCredentialsBinding',
             credentialsId: 'aws credential',
             accessKeyVariable: 'AWS_ACCESS_KEY_ID',
             secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
           ]]) {
-            env.DEPLOY_HOST = sh(
+            // Fetch all 4 EC2 instance IPs
+            env.DEPLOY_HOST_1 = sh(
               script: """
                 docker run --rm \
                   -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
                   -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
                   -e AWS_DEFAULT_REGION=${AWS_REGION} \
                   amazon/aws-cli:latest \
-                  ssm get-parameter --name ${SSM_PARAM_PUBLIC_IP} --query Parameter.Value --output text
+                  ssm get-parameter --name /app/${PROJECT_NAME}/ec2/public_ip_1 --query Parameter.Value --output text
+              """,
+              returnStdout: true
+            ).trim()
+
+            env.DEPLOY_HOST_2 = sh(
+              script: """
+                docker run --rm \
+                  -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+                  -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+                  -e AWS_DEFAULT_REGION=${AWS_REGION} \
+                  amazon/aws-cli:latest \
+                  ssm get-parameter --name /app/${PROJECT_NAME}/ec2/public_ip_2 --query Parameter.Value --output text
+              """,
+              returnStdout: true
+            ).trim()
+
+            env.DEPLOY_HOST_3 = sh(
+              script: """
+                docker run --rm \
+                  -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+                  -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+                  -e AWS_DEFAULT_REGION=${AWS_REGION} \
+                  amazon/aws-cli:latest \
+                  ssm get-parameter --name /app/${PROJECT_NAME}/ec2/public_ip_3 --query Parameter.Value --output text
+              """,
+              returnStdout: true
+            ).trim()
+
+            env.DEPLOY_HOST_4 = sh(
+              script: """
+                docker run --rm \
+                  -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+                  -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+                  -e AWS_DEFAULT_REGION=${AWS_REGION} \
+                  amazon/aws-cli:latest \
+                  ssm get-parameter --name /app/${PROJECT_NAME}/ec2/public_ip_4 --query Parameter.Value --output text
+              """,
+              returnStdout: true
+            ).trim()
+
+            env.ALB_DNS = sh(
+              script: """
+                docker run --rm \
+                  -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+                  -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+                  -e AWS_DEFAULT_REGION=${AWS_REGION} \
+                  amazon/aws-cli:latest \
+                  ssm get-parameter --name /app/${PROJECT_NAME}/alb/dns_name --query Parameter.Value --output text
               """,
               returnStdout: true
             ).trim()
           }
 
-          echo "✅ Deploying to: ${env.DEPLOY_HOST}"
+          echo "✅ Deploying to 4 EC2 instances:"
+          echo "   Instance 1: ${env.DEPLOY_HOST_1}"
+          echo "   Instance 2: ${env.DEPLOY_HOST_2}"
+          echo "   Instance 3: ${env.DEPLOY_HOST_3}"
+          echo "   Instance 4: ${env.DEPLOY_HOST_4}"
+          echo "   ALB DNS: ${env.ALB_DNS}"
         }
       }
     }
 
-    stage('Deploy to EC2') {
-      // WHAT: Connects to EC2 via SSH and deploys Docker container
-      // WHY: Automates deployment, no manual SSH required
+    stage('Deploy to EC2 Instances') {
+      // WHAT: Connects to all 4 EC2 instances and deploys Docker container
+      // WHY: Automates deployment to all instances behind ALB
 
       steps {
         script {
@@ -260,7 +310,7 @@ pipeline {
             sh '''
               set -e
 
-              # Fetch SSH private key from SSM using Jenkins AWS credentials
+              # Fetch SSH private key from SSM
               docker run --rm \
                 -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
                 -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
@@ -270,17 +320,52 @@ pipeline {
 
               chmod 400 ec2-key.pem
 
-              # Deploy to EC2 via SSH
-              ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST} << 'ENDSSH'
+              # Deploy to Instance 1
+              echo "🚀 Deploying to Instance 1: ${DEPLOY_HOST_1}"
+              ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST_1} << 'ENDSSH'
                 set -e
                 sudo docker pull nkorganci/hello-aws:latest
                 sudo docker stop helloaws 2>/dev/null || true
                 sudo docker rm helloaws 2>/dev/null || true
                 sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
-                echo "✅ Deployment complete!"
+                echo "✅ Instance 1 deployment complete!"
+ENDSSH
+
+              # Deploy to Instance 2
+              echo "🚀 Deploying to Instance 2: ${DEPLOY_HOST_2}"
+              ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST_2} << 'ENDSSH'
+                set -e
+                sudo docker pull nkorganci/hello-aws:latest
+                sudo docker stop helloaws 2>/dev/null || true
+                sudo docker rm helloaws 2>/dev/null || true
+                sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
+                echo "✅ Instance 2 deployment complete!"
+ENDSSH
+
+              # Deploy to Instance 3
+              echo "🚀 Deploying to Instance 3: ${DEPLOY_HOST_3}"
+              ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST_3} << 'ENDSSH'
+                set -e
+                sudo docker pull nkorganci/hello-aws:latest
+                sudo docker stop helloaws 2>/dev/null || true
+                sudo docker rm helloaws 2>/dev/null || true
+                sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
+                echo "✅ Instance 3 deployment complete!"
+ENDSSH
+
+              # Deploy to Instance 4
+              echo "🚀 Deploying to Instance 4: ${DEPLOY_HOST_4}"
+              ssh -o StrictHostKeyChecking=no -i ec2-key.pem ${DEPLOY_USER}@${DEPLOY_HOST_4} << 'ENDSSH'
+                set -e
+                sudo docker pull nkorganci/hello-aws:latest
+                sudo docker stop helloaws 2>/dev/null || true
+                sudo docker rm helloaws 2>/dev/null || true
+                sudo docker run -d -p 8081:8081 --name helloaws --restart=always nkorganci/hello-aws:latest
+                echo "✅ Instance 4 deployment complete!"
 ENDSSH
 
               rm -f ec2-key.pem
+              echo "✅ All instances deployed successfully!"
             '''
           }
         }
@@ -288,22 +373,55 @@ ENDSSH
     }
 
     stage('Verify Deployment') {
-      // WHAT: Tests if application is responding to HTTP requests
+      // WHAT: Tests if all instances and ALB are responding
       // WHY: Confirms deployment succeeded and app is healthy
 
       steps {
-        sleep(time: 10, unit: 'SECONDS')
-        // WHAT: Waits 10 seconds before testing
-        // WHY: Gives Spring Boot time to fully start up
-        // WITHOUT: Health check runs too early, shows failure even if deployment worked
-        // BEST PRACTICE: Use retry logic instead of fixed sleep
+        sleep(time: 15, unit: 'SECONDS')
+        // WHAT: Waits 15 seconds before testing
+        // WHY: Gives Spring Boot time to fully start up on all instances
 
         sh '''
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST}:8081/hello || echo "000")
-          if [ "$RESPONSE" = "200" ]; then
-            echo "✅ Application is responding!"
+          echo "🔍 Verifying deployment on all instances..."
+
+          # Test Instance 1
+          RESPONSE1=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST_1}:8081/hello || echo "000")
+          if [ "$RESPONSE1" = "200" ]; then
+            echo "✅ Instance 1 (${DEPLOY_HOST_1}) is responding!"
           else
-            echo "⚠️ Application returned HTTP $RESPONSE"
+            echo "⚠️ Instance 1 returned HTTP $RESPONSE1"
+          fi
+
+          # Test Instance 2
+          RESPONSE2=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST_2}:8081/hello || echo "000")
+          if [ "$RESPONSE2" = "200" ]; then
+            echo "✅ Instance 2 (${DEPLOY_HOST_2}) is responding!"
+          else
+            echo "⚠️ Instance 2 returned HTTP $RESPONSE2"
+          fi
+
+          # Test Instance 3
+          RESPONSE3=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST_3}:8081/hello || echo "000")
+          if [ "$RESPONSE3" = "200" ]; then
+            echo "✅ Instance 3 (${DEPLOY_HOST_3}) is responding!"
+          else
+            echo "⚠️ Instance 3 returned HTTP $RESPONSE3"
+          fi
+
+          # Test Instance 4
+          RESPONSE4=$(curl -s -o /dev/null -w "%{http_code}" http://${DEPLOY_HOST_4}:8081/hello || echo "000")
+          if [ "$RESPONSE4" = "200" ]; then
+            echo "✅ Instance 4 (${DEPLOY_HOST_4}) is responding!"
+          else
+            echo "⚠️ Instance 4 returned HTTP $RESPONSE4"
+          fi
+
+          # Test ALB
+          RESPONSE_ALB=$(curl -s -o /dev/null -w "%{http_code}" http://${ALB_DNS}:8081/hello || echo "000")
+          if [ "$RESPONSE_ALB" = "200" ]; then
+            echo "✅ ALB (${ALB_DNS}) is responding and load balancing!"
+          else
+            echo "⚠️ ALB returned HTTP $RESPONSE_ALB"
           fi
         '''
       }
@@ -321,7 +439,22 @@ ENDSSH
       // BEST PRACTICE: Send notifications (Slack, email) here
 
       echo "✅ Deployment Successful!"
-      echo "Access your application at: http://${DEPLOY_HOST}:8081"
+      echo ""
+      echo "=========================================="
+      echo "Application URLs:"
+      echo "=========================================="
+      echo "🌐 Access via ALB (Load Balanced):"
+      echo "   http://${ALB_DNS}:8081/hello"
+      echo "   http://${ALB_DNS}/hello (port 80)"
+      echo ""
+      echo "🖥️  Direct EC2 Instance Access:"
+      echo "   Instance 1: http://${DEPLOY_HOST_1}:8081/hello"
+      echo "   Instance 2: http://${DEPLOY_HOST_2}:8081/hello"
+      echo "   Instance 3: http://${DEPLOY_HOST_3}:8081/hello"
+      echo "   Instance 4: http://${DEPLOY_HOST_4}:8081/hello"
+      echo "=========================================="
+      echo ""
+      echo "💡 Tip: Access ALB URL multiple times to see different EC2 IPs!"
     }
 
     failure {
