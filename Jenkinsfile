@@ -217,13 +217,15 @@ pipeline {
         script {
           // WHAT: Retrieves EC2 public IP from AWS SSM Parameter Store
           // WHY: IP changes when instance restarts, need dynamic lookup
-          // AUTHENTICATION: Reads AWS credentials from Jenkins credentials or mounted volume
-          // NOTE: Uses AWS credentials stored in Jenkins with ID 'aws-credentials'
+          // AUTHENTICATION: Uses AWS credentials from Jenkins (kind: AWS Credentials)
+          // NOTE: Credential ID 'aws credential' automatically provides AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
 
-          withCredentials([
-            string(credentialsId: 'aws-access-key-id', variable: 'AWS_ACCESS_KEY_ID'),
-            string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')
-          ]) {
+          withCredentials([[
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: 'aws credential',
+            accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+            secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+          ]]) {
             env.DEPLOY_HOST = sh(
               script: """
                 docker run --rm \
@@ -248,14 +250,16 @@ pipeline {
 
       steps {
         script {
-          withCredentials([
-            string(credentialsId: 'aws-access-key-id', variable: 'AWS_ACCESS_KEY_ID'),
-            string(credentialsId: 'aws-secret-access-key', variable: 'AWS_SECRET_ACCESS_KEY')
-          ]) {
+          withCredentials([[
+            $class: 'AmazonWebServicesCredentialsBinding',
+            credentialsId: 'aws credential',
+            accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+            secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+          ]]) {
             sh '''
               set -e
 
-              # Fetch SSH private key from SSM using Jenkins credentials
+              # Fetch SSH private key from SSM using Jenkins AWS credentials
               docker run --rm \
                 -e AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
                 -e AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
@@ -438,22 +442,18 @@ ENDSSH
  *
  * 1. ✅ Docker Hub credentials
  *    Path: Manage Jenkins → Credentials → System → Global → Add Credentials
- *    Type: Username with password
+ *    Kind: Username with password
  *    ID: 'dockerhub'
  *    Username: Your Docker Hub username
  *    Password: Your Docker Hub password
  *
- * 2. ✅ AWS Access Key ID
+ * 2. ✅ AWS Credentials
  *    Path: Manage Jenkins → Credentials → System → Global → Add Credentials
- *    Type: Secret text
- *    ID: 'aws-access-key-id'
- *    Secret: Your AWS Access Key ID (from aws configure)
- *
- * 3. ✅ AWS Secret Access Key
- *    Path: Manage Jenkins → Credentials → System → Global → Add Credentials
- *    Type: Secret text
- *    ID: 'aws-secret-access-key'
- *    Secret: Your AWS Secret Access Key (from aws configure)
+ *    Kind: AWS Credentials
+ *    ID: 'aws credential'
+ *    Access Key ID: Your AWS Access Key ID (from C:\Users\USERNAME\.aws\credentials)
+ *    Secret Access Key: Your AWS Secret Access Key (from C:\Users\USERNAME\.aws\credentials)
+ *    Description: AWS credentials for SSM and deployment
  *
  * AWS INFRASTRUCTURE (via Terraform):
  * 1. ✅ EC2 instance running with Docker installed
