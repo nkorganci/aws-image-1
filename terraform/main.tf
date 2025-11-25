@@ -518,7 +518,7 @@ resource "aws_ssm_parameter" "ec2_private_key" {
   # WITHOUT: Name collision with other projects
   # BEST PRACTICE: Use hierarchical paths for organization
 
-  description = "Private key for EC2 instance ${aws_instance.app_server.id}"
+  description = "Private key for EC2 instances in ${var.project_name}"
 
   type        = "SecureString"
   # WHAT: Encrypted parameter type using AWS KMS
